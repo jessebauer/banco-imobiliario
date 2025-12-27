@@ -20,6 +20,14 @@ type Session = {
 
 const playerColors = ["#5FE3B2", "#F5D76E", "#7DD6FF", "#F8A6C2", "#C4A4FF", "#8DF1A8", "#F3A45F"];
 const defaultName = `Jogador-${Math.floor(Math.random() * 900 + 100)}`;
+type ActionOption = {
+  label: string;
+  action?: () => void;
+  disabled?: boolean;
+  tone?: "primary" | "ghost" | "danger";
+  icon?: string;
+  detail?: string;
+};
 
 export default function App() {
   const [mode, setMode] = useState<ConnectionMode>("host");
@@ -37,6 +45,10 @@ export default function App() {
   const [lastMovedTileId, setLastMovedTileId] = useState<string | null>(null);
   const [seenEventLogId, setSeenEventLogId] = useState<string | null>(null);
   const [theme, setTheme] = useState<"classic" | "contrast">("classic");
+  const [isMobile, setIsMobile] = useState<boolean>(() =>
+    typeof window !== "undefined" ? window.matchMedia("(max-width: 900px)").matches : false
+  );
+  const [isActionSheetOpen, setIsActionSheetOpen] = useState(false);
   const reconnectRef = useRef<{ roomId: string; playerId: string; server: string } | null>(null);
   const eventHydratedRef = useRef(false);
   const suppressReconnectRef = useRef(false);
@@ -66,6 +78,14 @@ export default function App() {
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
   }, [theme]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const handler = () => setIsMobile(window.matchMedia("(max-width: 900px)").matches);
+    handler();
+    window.addEventListener("resize", handler);
+    return () => window.removeEventListener("resize", handler);
+  }, []);
 
   const connect = (payload: ClientMessage, targetServer = serverUrl) => {
     setConnecting(true);
@@ -197,6 +217,41 @@ export default function App() {
     game?.status === "active" ? "Partida em andamento" : game?.status === "finished" ? "Partida encerrada" : "Sala aberta";
 
   const turnSteps = buildTurnSteps(isMyTurn, game?.turn, awaitingTile);
+  const lastLogEntry = useMemo(() => (game?.log.length ? game.log[game.log.length - 1] : null), [game?.log]);
+
+  const primaryAction = useMemo<ActionOption>(() => {
+    if (!game) return { label: "Conecte-se para jogar", disabled: true, tone: "ghost", icon: "⏳" };
+    if (game.status === "lobby" && game.hostId === session?.playerId) {
+      return { label: "Iniciar partida", action: () => send({ type: "startGame" }), tone: "primary", icon: "🚀" };
+    }
+    if (!isMyTurn) return { label: "Aguardando turno", disabled: true, tone: "ghost", icon: "⏳" };
+    if (!game.turn.rolled) return { label: "Rolar dados", action: () => send({ type: "rollDice" }), tone: "primary", icon: "🎲" };
+    if (awaitingTile)
+      return {
+        label: "Comprar",
+        action: () => send({ type: "buyProperty", propertyId: awaitingTile.id }),
+        tone: "primary",
+        icon: "💰"
+      };
+    return { label: "Finalizar turno", action: () => send({ type: "endTurn" }), tone: "primary", icon: "✅" };
+  }, [awaitingTile, game, isMyTurn, send, session?.playerId]);
+
+  const secondaryActions = useMemo<ActionOption[]>(() => {
+    const actions: ActionOption[] = [];
+    if (isMyTurn && awaitingTile) {
+      actions.push({ label: "Passar compra", action: () => send({ type: "passPurchase" }), icon: "↩" });
+    }
+    if (isMyTurn && me?.inJailTurns) {
+      actions.push({ label: "Pagar fiança", action: () => send({ type: "payBail" }), icon: "🪙" });
+    }
+    if (game?.hostId === session?.playerId && game?.status === "active") {
+      actions.push({ label: "Encerrar por patrimônio", action: () => send({ type: "finishGame" }), icon: "🏁" });
+    }
+    if (game?.hostId === session?.playerId && game?.status === "lobby") {
+      actions.push({ label: "Iniciar partida", action: () => send({ type: "startGame" }), icon: "🚀" });
+    }
+    return actions.filter((a) => a.label !== primaryAction.label);
+  }, [awaitingTile, game, isMyTurn, me?.inJailTurns, primaryAction.label, send, session?.playerId]);
 
   useEffect(() => {
     if (eventHydratedRef.current || !game) return;
@@ -212,7 +267,19 @@ export default function App() {
   };
 
   return (
-    <div className="page">
+    <div className={`page ${isMobile ? "is-mobile" : ""}`}>
+      {isMobile && (
+        <MobileHud
+          money={me?.money ?? game?.settings.startingCash ?? 0}
+          playerName={me?.name || name}
+          isMyTurn={isMyTurn}
+          statusLabel={statusLabel}
+          theme={theme}
+          onToggleTheme={() => setTheme(theme === "classic" ? "contrast" : "classic")}
+          lastRoll={lastRoll}
+          logSnippet={lastLogEntry?.message}
+        />
+      )}
       <header className="topbar">
         <div>
           <p className="eyebrow">Banco Imobiliário LAN</p>
@@ -298,6 +365,7 @@ export default function App() {
                 meId={session?.playerId}
                 colors={playerColorMap}
                 lastMovedTileId={lastMovedTileId || undefined}
+                compact={isMobile}
               />
               <TileOverlay
                 awaitingTile={awaitingTile || undefined}
@@ -308,6 +376,16 @@ export default function App() {
                 onPass={() => send({ type: "passPurchase" })}
                 onDismissEvent={() => lastEventCard && setSeenEventLogId(lastEventCard.logId)}
               />
+              {isMobile && lastLogEntry && (
+                <div className="mobile-last-log">
+                  <div className="dot" />
+                  <div className="text">
+                    <p className="muted small">Última ação</p>
+                    <strong>{lastLogEntry.message}</strong>
+                  </div>
+                  <span className="badge event">Log</span>
+                </div>
+              )}
             </>
           ) : (
             <div className="empty">Conecte-se a uma sala para ver o tabuleiro.</div>
@@ -413,6 +491,143 @@ export default function App() {
           </div>
         </div>
       </section>
+      {isMobile && game && (
+        <MobileActionBar
+          primary={primaryAction}
+          secondary={secondaryActions}
+          isOpen={isActionSheetOpen}
+          onToggle={() => setIsActionSheetOpen((open) => !open)}
+          lastRoll={lastRoll}
+          lastLog={lastLogEntry?.message}
+          isMyTurn={isMyTurn}
+        />
+      )}
+    </div>
+  );
+}
+
+function MobileHud({
+  money,
+  playerName,
+  isMyTurn,
+  statusLabel,
+  theme,
+  onToggleTheme,
+  lastRoll,
+  logSnippet
+}: {
+  money: number;
+  playerName?: string;
+  isMyTurn: boolean;
+  statusLabel: string;
+  theme: "classic" | "contrast";
+  onToggleTheme: () => void;
+  lastRoll: DiceRoll | null;
+  logSnippet?: string;
+}) {
+  return (
+    <div className="mobile-hud">
+      <div className="hud-main">
+        <div className="hud-left">
+          <span className={`turn-icon ${isMyTurn ? "active" : ""}`}>{isMyTurn ? "🟢" : "⏳"}</span>
+          <div>
+            <p className="eyebrow">Dinheiro</p>
+            <div className="money-large">{money.toLocaleString("pt-BR")}</div>
+            <div className="muted small">{playerName}</div>
+          </div>
+        </div>
+        <div className="hud-actions">
+          <span className="chip inline">{statusLabel}</span>
+          <button className="icon-button" onClick={onToggleTheme} aria-label="Alternar tema">
+            {theme === "classic" ? "☀️" : "🌙"}
+          </button>
+          <button className="icon-button" aria-label="Menu rápido">
+            ⋮
+          </button>
+        </div>
+      </div>
+      <div className="hud-meta">
+        {lastRoll && (
+          <span className="pill subtle">
+            🎲 {lastRoll.values.join(" + ")} = {lastRoll.total}
+          </span>
+        )}
+        {logSnippet && <span className="pill subtle">📝 {logSnippet}</span>}
+      </div>
+    </div>
+  );
+}
+
+function MobileActionBar({
+  primary,
+  secondary,
+  isOpen,
+  onToggle,
+  lastRoll,
+  lastLog,
+  isMyTurn
+}: {
+  primary: ActionOption;
+  secondary: ActionOption[];
+  isOpen: boolean;
+  onToggle: () => void;
+  lastRoll: DiceRoll | null;
+  lastLog?: string | null;
+  isMyTurn: boolean;
+}) {
+  const handlePrimary = () => {
+    if (!primary.action || primary.disabled) return;
+    primary.action();
+  };
+  const hasSheet = secondary.length > 0;
+
+  return (
+    <div className={`mobile-action-bar ${isOpen ? "open" : ""}`}>
+      <div className="action-main">
+        <div className={`turn-indicator ${isMyTurn ? "on" : ""}`}>{isMyTurn ? "🟢" : "⏳"}</div>
+        <button
+          className={`primary-action ${primary.tone ?? "ghost"}`}
+          disabled={primary.disabled}
+          onClick={handlePrimary}
+        >
+          {primary.icon && <span className="emoji">{primary.icon}</span>}
+          <span>{primary.label}</span>
+        </button>
+        {hasSheet && (
+          <button className="sheet-toggle" onClick={onToggle} aria-label="Ações secundárias">
+            {isOpen ? "Fechar" : "Ações"}
+          </button>
+        )}
+      </div>
+      {hasSheet && (
+        <div className="mobile-sheet">
+          <div className="sheet-handle" onClick={onToggle} />
+          <div className="secondary-grid">
+            {secondary.map((action) => (
+              <button
+                key={action.label}
+                className={`secondary-action ${action.tone ?? ""}`}
+                disabled={action.disabled}
+                onClick={() => action.action && action.action()}
+              >
+                {action.icon && <span className="emoji">{action.icon}</span>}
+                <div className="text">
+                  <span>{action.label}</span>
+                  {action.detail && <span className="muted small">{action.detail}</span>}
+                </div>
+              </button>
+            ))}
+          </div>
+          <div className="sheet-foot">
+            {lastRoll && (
+              <span className="pill subtle">
+                🎲 {lastRoll.values.join(" + ")} = {lastRoll.total}
+              </span>
+            )}
+            {lastLog && <span className="pill subtle">📝 {lastLog}</span>}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -424,7 +639,8 @@ function Board({
   currentPlayerId,
   meId,
   colors,
-  lastMovedTileId
+  lastMovedTileId,
+  compact
 }: {
   tiles: Tile[];
   coords: { row: number; col: number }[];
@@ -433,9 +649,11 @@ function Board({
   meId?: string;
   colors: Map<string, string>;
   lastMovedTileId?: string;
+  compact?: boolean;
 }) {
+  const boardClass = `board ${compact ? "compact" : ""}`;
   return (
-    <div className="board">
+    <div className={boardClass}>
       {tiles.map((tile, idx) => {
         const pos = coords[idx];
         const tilePlayers = players.filter((p) => p.position === tile.index && !p.bankrupt);
@@ -458,23 +676,32 @@ function Board({
                 : tile.type === "go-to-jail"
                   ? "#ff7b7b"
                   : undefined;
+        const tileStyle = compact
+          ? { ["--tile-accent" as any]: accent }
+          : { gridRow: pos.row + 1, gridColumn: pos.col + 1, ["--tile-accent" as any]: accent };
         return (
           <div
             key={tile.id}
             className={tileClass}
-            style={{ gridRow: pos.row + 1, gridColumn: pos.col + 1, ["--tile-accent" as any]: accent }}
+            style={tileStyle}
           >
             <div className="tile-header">
-              <span className="tile-type">{tileLabel(tile.type)}</span>
-              <span className="tile-name">{tile.name}</span>
+              <span className="tile-icon">{tileGlyph(tile.type)}</span>
+              <div className="tile-title">
+                <span className="tile-type">{tileLabel(tile.type)}</span>
+                <span className="tile-name">{tile.name}</span>
+              </div>
             </div>
             <div className="tile-body">
               {tile.type === "property" && (
                 <>
-                  <span className="pill">
-                    <span>{tile.price}</span>
-                    <span>aluguel {(tile as PropertyTile).baseRent}</span>
-                  </span>
+                  <div className="price-line">
+                    <span className="pill">Preço {tile.price}</span>
+                    <div className="rent-highlight">
+                      <span className="rent-label">Aluguel</span>
+                      <span className="rent-value">{(tile as PropertyTile).baseRent}</span>
+                    </div>
+                  </div>
                   {(tile as PropertyTile).ownerId && (
                     <span className="muted small">
                       Dono: {(tile as PropertyTile).ownerId === meId ? "Você" : ownerName ?? "Jogador"}
@@ -683,6 +910,26 @@ function tileLabel(type: Tile["type"]) {
       return "Pausa";
     default:
       return type;
+  }
+}
+
+function tileGlyph(type: Tile["type"]) {
+  switch (type) {
+    case "property":
+      return "🏠";
+    case "tax":
+      return "💰";
+    case "event":
+      return "🎲";
+    case "jail":
+    case "go-to-jail":
+      return "🚓";
+    case "start":
+      return "🏁";
+    case "free":
+      return "⏸️";
+    default:
+      return "⬢";
   }
 }
 
