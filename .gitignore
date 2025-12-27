@@ -1,0 +1,10 @@
+node_modules
+dist
+build
+.DS_Store
+*.log
+*.lock
+*.cache
+.vite
+server/build
+client/dist

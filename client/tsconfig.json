@@ -1,0 +1,14 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["vite/client", "node"],
+    "baseUrl": ".",
+    "paths": {
+      "@banco/shared": ["../shared/src"]
+    }
+  },
+  "include": ["src"],
+  "references": [
+    { "path": "../shared" }
+  ]
+}
