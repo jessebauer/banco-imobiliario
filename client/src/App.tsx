@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   ClientMessage,
   DiceRoll,
@@ -57,6 +57,20 @@ export default function App() {
     typeof window !== "undefined" ? window.matchMedia("(max-width: 900px)").matches : false
   );
   const [isActionSheetOpen, setIsActionSheetOpen] = useState(false);
+  const [displayPositions, setDisplayPositions] = useState<Map<string, number>>(new Map());
+  const [isAnimatingMove, setIsAnimatingMove] = useState(false);
+  const [animatingPlayerId, setAnimatingPlayerId] = useState<string | null>(null);
+  const [autoFocusMobile, setAutoFocusMobile] = useState<boolean>(() => {
+    if (typeof window === "undefined") return true;
+    const stored = window.localStorage.getItem("autoFocusMobile");
+    return stored ? stored === "true" : true;
+  });
+  const boardRef = useRef<HTMLDivElement | null>(null);
+  const tileRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  const [tileCenters, setTileCenters] = useState<Map<string, { x: number; y: number }>>(new Map());
+  const previousGameRef = useRef<GameState | null>(null);
+  const animationCancelRef = useRef<{ cancelled: boolean } | null>(null);
+  const measureRafRef = useRef<number | null>(null);
   const reconnectRef = useRef<{ roomId: string; playerId: string; server: string } | null>(null);
   const eventHydratedRef = useRef(false);
   const suppressReconnectRef = useRef(false);
@@ -86,6 +100,11 @@ export default function App() {
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
   }, [theme]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem("autoFocusMobile", String(autoFocusMobile));
+  }, [autoFocusMobile]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -240,6 +259,69 @@ export default function App() {
     connect({ type: "joinRoom", roomId, playerName: name });
   };
 
+  const measureTiles = useCallback(() => {
+    if (!boardRef.current) return;
+    const centers = new Map<string, { x: number; y: number }>();
+    tileRefs.current.forEach((el, id) => {
+      centers.set(id, {
+        x: el.offsetLeft + el.clientWidth / 2,
+        y: el.offsetTop + el.clientHeight / 2
+      });
+    });
+    setTileCenters(centers);
+  }, []);
+
+  const scheduleMeasure = useCallback(() => {
+    if (typeof window === "undefined") return;
+    if (measureRafRef.current) window.cancelAnimationFrame(measureRafRef.current);
+    measureRafRef.current = window.requestAnimationFrame(() => {
+      measureTiles();
+      measureRafRef.current = null;
+    });
+  }, [measureTiles]);
+
+  const registerTileRef = useCallback(
+    (tileId: string, el: HTMLDivElement | null) => {
+      if (!el) {
+        tileRefs.current.delete(tileId);
+        return;
+      }
+      tileRefs.current.set(tileId, el);
+      scheduleMeasure();
+    },
+    [scheduleMeasure]
+  );
+
+  useLayoutEffect(() => {
+    scheduleMeasure();
+    return () => {
+      if (measureRafRef.current) {
+        cancelAnimationFrame(measureRafRef.current);
+        measureRafRef.current = null;
+      }
+    };
+  }, [game?.tiles.length, isMobile, scheduleMeasure]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const handle = () => scheduleMeasure();
+    window.addEventListener("resize", handle);
+    return () => window.removeEventListener("resize", handle);
+  }, [scheduleMeasure]);
+
+  const focusOnTileIndex = useCallback(
+    (tileIndex: number, behavior: ScrollBehavior = "smooth") => {
+      if (!isMobile || !autoFocusMobile) return;
+      const tile = game?.tiles.find((t) => t.index === tileIndex);
+      if (!tile) return;
+      const el = tileRefs.current.get(tile.id);
+      if (el) {
+        el.scrollIntoView({ behavior, inline: "center", block: "center" });
+      }
+    },
+    [autoFocusMobile, game?.tiles, isMobile]
+  );
+
   const send = (message: ClientMessage) => {
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       setError("Sem conexão com o servidor.");
@@ -290,45 +372,190 @@ export default function App() {
   const shouldShowEventCard =
     lastEventCard && lastEventCard.logId !== seenEventLogId && game?.turn.currentPlayerId === session?.playerId;
 
+  useEffect(() => {
+    if (!game) {
+      setDisplayPositions(new Map());
+      previousGameRef.current = null;
+      setIsAnimatingMove(false);
+      setAnimatingPlayerId(null);
+      return;
+    }
+    const prevGame = previousGameRef.current;
+    setDisplayPositions((prev) => {
+      const next = new Map(prev);
+      game.players.forEach((p) => {
+        const prevPos = prevGame?.players.find((prevPlayer) => prevPlayer.id === p.id)?.position;
+        const hasMoved = prevPos !== undefined && prevPos !== p.position;
+        const isCurrentAnimating = isAnimatingMove && animatingPlayerId === p.id;
+
+        if (isCurrentAnimating) return;
+
+        if (hasMoved && prevPos !== undefined) {
+          // Keep pawn at the previous tile until the animation progresses.
+          next.set(p.id, prevPos);
+        } else if (!prev.has(p.id) || !isAnimatingMove || animatingPlayerId !== p.id) {
+          next.set(p.id, p.position);
+        }
+      });
+      return next;
+    });
+  }, [animatingPlayerId, game, isAnimatingMove]);
+
   const statusLabel =
     game?.status === "active" ? "Partida em andamento" : game?.status === "finished" ? "Partida encerrada" : "Sala aberta";
 
   const turnSteps = buildTurnSteps(isMyTurn, game?.turn, awaitingTile);
   const lastLogEntry = useMemo(() => (game?.log.length ? game.log[game.log.length - 1] : null), [game?.log]);
 
+  const animatePlayerMovement = useCallback(
+    async ({
+      playerId,
+      from,
+      to,
+      steps,
+      tilesCount
+    }: {
+      playerId: string;
+      from: number;
+      to: number;
+      steps: number;
+      tilesCount: number;
+    }) => {
+      if (tilesCount <= 0) return;
+      if (animationCancelRef.current) {
+      animationCancelRef.current.cancelled = true;
+    }
+    const token = { cancelled: false };
+    animationCancelRef.current = token;
+    setIsAnimatingMove(true);
+    setAnimatingPlayerId(playerId);
+    setDisplayPositions((prev) => {
+      const next = new Map(prev);
+      next.set(playerId, from);
+      return next;
+    });
+    focusOnTileIndex(from, "smooth");
+    let current = from;
+    const path = buildStepPath(from, steps, tilesCount);
+    for (const pos of path) {
+      if (token.cancelled) return;
+        current = pos;
+        setDisplayPositions((prev) => {
+          const next = new Map(prev);
+          next.set(playerId, pos);
+          return next;
+        });
+        focusOnTileIndex(pos, "smooth");
+        await sleep(380);
+      }
+      if (!token.cancelled && current !== to) {
+        setDisplayPositions((prev) => {
+          const next = new Map(prev);
+          next.set(playerId, to);
+          return next;
+        });
+        focusOnTileIndex(to, "smooth");
+        current = to;
+        await sleep(420);
+      }
+      if (!token.cancelled) {
+        setDisplayPositions((prev) => {
+          const next = new Map(prev);
+          next.set(playerId, to);
+          return next;
+        });
+      }
+      if (token.cancelled) return;
+      animationCancelRef.current = null;
+      setIsAnimatingMove(false);
+      setAnimatingPlayerId(null);
+    },
+    [focusOnTileIndex]
+  );
+
+  useEffect(() => {
+    if (!game) return;
+    const prev = previousGameRef.current;
+    const tilesCount = game.tiles.length;
+    const activeId = game.turn.currentPlayerId;
+    const currentPlayer = game.players.find((p) => p.id === activeId);
+    const prevPlayer = prev?.players.find((p) => p.id === activeId);
+    if (prev && prevPlayer && currentPlayer && prevPlayer.position !== currentPlayer.position) {
+      const diceChanged =
+        !!game.turn.dice && (!prev.turn.dice || prev.turn.dice.timestamp !== game.turn.dice.timestamp);
+      const steps = diceChanged
+        ? game.turn.dice!.total
+        : wrappedDelta(prevPlayer.position, currentPlayer.position, tilesCount);
+      animatePlayerMovement({ playerId: activeId, from: prevPlayer.position, to: currentPlayer.position, steps, tilesCount });
+    } else if (!prev && currentPlayer) {
+      focusOnTileIndex(currentPlayer.position, "auto");
+    }
+    const turnChanged = prev?.turn.currentPlayerId !== game.turn.currentPlayerId;
+    if (turnChanged && currentPlayer) {
+      focusOnTileIndex(currentPlayer.position, "smooth");
+    }
+    previousGameRef.current = game;
+    scheduleMeasure();
+  }, [animatePlayerMovement, focusOnTileIndex, game, scheduleMeasure]);
+
   const primaryAction = useMemo<ActionOption>(() => {
     if (!game) return { label: "Conecte-se para jogar", disabled: true, tone: "ghost", icon: "⏳" };
     if (game.status === "lobby" && game.hostId === session?.playerId) {
-      return { label: "Iniciar partida", action: () => send({ type: "startGame" }), tone: "primary", icon: "🚀" };
+      return {
+        label: "Iniciar partida",
+        action: () => send({ type: "startGame" }),
+        tone: "primary",
+        icon: "🚀",
+        disabled: isAnimatingMove
+      };
     }
     if (!isMyTurn) return { label: "Aguardando turno", disabled: true, tone: "ghost", icon: "⏳" };
-    if (!game.turn.rolled) return { label: "Rolar dados", action: () => send({ type: "rollDice" }), tone: "primary", icon: "🎲" };
+    if (!game.turn.rolled)
+      return {
+        label: "Rolar dados",
+        action: () => send({ type: "rollDice" }),
+        tone: "primary",
+        icon: "🎲",
+        disabled: isAnimatingMove
+      };
     if (awaitingTile)
       return {
         label: "Comprar",
         action: () => send({ type: "buyProperty", propertyId: awaitingTile.id }),
         tone: "primary",
-        icon: "💰"
+        icon: "💰",
+        disabled: isAnimatingMove
       };
-    return { label: "Finalizar turno", action: () => send({ type: "endTurn" }), tone: "primary", icon: "✅" };
-  }, [awaitingTile, game, isMyTurn, send, session?.playerId]);
+    return {
+      label: "Finalizar turno",
+      action: () => send({ type: "endTurn" }),
+      tone: "primary",
+      icon: "✅",
+      disabled: isAnimatingMove
+    };
+  }, [awaitingTile, game, isAnimatingMove, isMyTurn, send, session?.playerId]);
 
   const secondaryActions = useMemo<ActionOption[]>(() => {
     const actions: ActionOption[] = [];
     if (isMyTurn && awaitingTile) {
-      actions.push({ label: "Passar compra", action: () => send({ type: "passPurchase" }), icon: "↩" });
+      actions.push({ label: "Passar compra", action: () => send({ type: "passPurchase" }), icon: "↩", disabled: isAnimatingMove });
     }
     if (isMyTurn && me?.inJailTurns) {
-      actions.push({ label: "Pagar fiança", action: () => send({ type: "payBail" }), icon: "🪙" });
+      actions.push({ label: "Pagar fiança", action: () => send({ type: "payBail" }), icon: "🪙", disabled: isAnimatingMove });
     }
     if (game?.hostId === session?.playerId && game?.status === "active") {
-      actions.push({ label: "Encerrar por patrimônio", action: () => send({ type: "finishGame" }), icon: "🏁" });
+      actions.push({
+        label: "Encerrar por patrimônio",
+        action: () => send({ type: "finishGame" }),
+        icon: "🏁",
+        disabled: isAnimatingMove
+      });
     }
     if (game?.hostId === session?.playerId && game?.status === "lobby") {
-      actions.push({ label: "Iniciar partida", action: () => send({ type: "startGame" }), icon: "🚀" });
+      actions.push({ label: "Iniciar partida", action: () => send({ type: "startGame" }), icon: "🚀", disabled: isAnimatingMove });
     }
     return actions.filter((a) => a.label !== primaryAction.label);
-  }, [awaitingTile, game, isMyTurn, me?.inJailTurns, primaryAction.label, send, session?.playerId]);
+  }, [awaitingTile, game, isAnimatingMove, isMyTurn, me?.inJailTurns, primaryAction.label, send, session?.playerId]);
 
   useEffect(() => {
     if (eventHydratedRef.current || !game) return;
@@ -514,12 +741,18 @@ export default function App() {
                 colors={playerColorMap}
                 lastMovedTileId={lastMovedTileId || undefined}
                 compact={isMobile}
+                displayPositions={displayPositions}
+                tileCenters={tileCenters}
+                registerTileRef={registerTileRef}
+                boardRef={boardRef}
+                animatingPlayerId={animatingPlayerId}
               />
               <TileOverlay
                 awaitingTile={awaitingTile || undefined}
                 currentTile={currentTile}
                 eventCard={shouldShowEventCard ? lastEventCard : null}
                 isMyTurn={isMyTurn}
+                isAnimating={isAnimatingMove}
                 onBuy={() => awaitingTile && send({ type: "buyProperty", propertyId: awaitingTile.id })}
                 onPass={() => send({ type: "passPurchase" })}
                 onDismissEvent={() => lastEventCard && setSeenEventLogId(lastEventCard.logId)}
@@ -570,30 +803,32 @@ export default function App() {
               <span className="muted">{isMyTurn ? "Seu turno" : "Aguarde"}</span>
             </div>
             <div className="actions-grid">
-              <button disabled={!isMyTurn || !!game?.turn.rolled} onClick={() => send({ type: "rollDice" })}>
+              <button disabled={!isMyTurn || !!game?.turn.rolled || isAnimatingMove} onClick={() => send({ type: "rollDice" })}>
                 Rolar dados
               </button>
               <button
-                disabled={!isMyTurn || !awaitingTile}
+                disabled={!isMyTurn || !awaitingTile || isAnimatingMove}
                 onClick={() => awaitingTile && send({ type: "buyProperty", propertyId: awaitingTile.id })}
                 className="primary"
               >
                 Comprar
               </button>
-              <button disabled={!isMyTurn || !awaitingTile} onClick={() => send({ type: "passPurchase" })}>
+              <button disabled={!isMyTurn || !awaitingTile || isAnimatingMove} onClick={() => send({ type: "passPurchase" })}>
                 Passar compra
               </button>
-              <button disabled={!isMyTurn} onClick={() => send({ type: "endTurn" })}>
+              <button disabled={!isMyTurn || isAnimatingMove} onClick={() => send({ type: "endTurn" })}>
                 Finalizar turno
               </button>
-              <button disabled={!isMyTurn || !me?.inJailTurns} onClick={() => send({ type: "payBail" })}>
+              <button disabled={!isMyTurn || !me?.inJailTurns || isAnimatingMove} onClick={() => send({ type: "payBail" })}>
                 Pagar fiança
               </button>
               {game?.hostId === session?.playerId && game?.status === "active" && (
-                <button onClick={handleFinishNetWorth}>Encerrar por patrimônio</button>
+                <button onClick={handleFinishNetWorth} disabled={isAnimatingMove}>
+                  Encerrar por patrimônio
+                </button>
               )}
               {game?.hostId === session?.playerId && game?.status === "lobby" && (
-                <button onClick={() => send({ type: "startGame" })} className="primary">
+                <button onClick={() => send({ type: "startGame" })} className="primary" disabled={isAnimatingMove}>
                   Iniciar partida
                 </button>
               )}
@@ -616,6 +851,24 @@ export default function App() {
                 Você está em <strong>{currentTile.name}</strong>
               </div>
             )}
+          </div>
+
+          <div className="panel">
+            <div className="panel-header">
+              <h3>Configurações</h3>
+              <span className="muted">Mobile</span>
+            </div>
+            <label className="toggle-row">
+              <input
+                type="checkbox"
+                checked={autoFocusMobile}
+                onChange={(e) => setAutoFocusMobile(e.target.checked)}
+              />
+              <div className="toggle-copy">
+                <strong>Foco automático</strong>
+                <p className="muted small">Acompanha o jogador ativo durante a movimentação.</p>
+              </div>
+            </label>
           </div>
 
           <div className="panel log">
@@ -788,7 +1041,12 @@ function Board({
   meId,
   colors,
   lastMovedTileId,
-  compact
+  compact,
+  displayPositions,
+  tileCenters,
+  registerTileRef,
+  boardRef,
+  animatingPlayerId
 }: {
   tiles: Tile[];
   coords: { row: number; col: number }[];
@@ -798,13 +1056,32 @@ function Board({
   colors: Map<string, string>;
   lastMovedTileId?: string;
   compact?: boolean;
+  displayPositions: Map<string, number>;
+  tileCenters: Map<string, { x: number; y: number }>;
+  registerTileRef?: (tileId: string, el: HTMLDivElement | null) => void;
+  boardRef?: React.RefObject<HTMLDivElement>;
+  animatingPlayerId?: string | null;
 }) {
   const boardClass = `board ${compact ? "compact" : ""}`;
+  const stacks = useMemo(() => {
+    const grouped = new Map<number, string[]>();
+    players.forEach((p) => {
+      if (p.bankrupt) return;
+      const pos = displayPositions.get(p.id) ?? p.position;
+      const list = grouped.get(pos) ?? [];
+      list.push(p.id);
+      grouped.set(pos, list);
+    });
+    return grouped;
+  }, [displayPositions, players]);
   return (
-    <div className={boardClass}>
+    <div className={boardClass} ref={boardRef}>
       {tiles.map((tile, idx) => {
         const pos = coords[idx];
-        const tilePlayers = players.filter((p) => p.position === tile.index && !p.bankrupt);
+        const tilePlayers = players.filter((p) => {
+          const displayPos = displayPositions.get(p.id) ?? p.position;
+          return displayPos === tile.index && !p.bankrupt;
+        });
         const ownerName =
           tile.type === "property" && (tile as PropertyTile).ownerId
             ? players.find((p) => p.id === (tile as PropertyTile).ownerId)?.name
@@ -832,6 +1109,7 @@ function Board({
             key={tile.id}
             className={tileClass}
             style={tileStyle}
+            ref={(el) => registerTileRef?.(tile.id, el)}
           >
             <div className="tile-header">
               <span className="tile-icon">{tileGlyph(tile.type)}</span>
@@ -865,24 +1143,44 @@ function Board({
                 </span>
               )}
             </div>
-            <div className="pawns">
-              {tilePlayers.map((p, i) => (
-                <span
-                  key={p.id}
-                  className="pawn"
-                  style={{
-                    background: colors.get(p.id) || playerColors[i % playerColors.length],
-                    outline: p.id === currentPlayerId ? "2px solid rgba(255,255,255,0.8)" : "none"
-                  }}
-                  title={p.name}
-                >
-                  {p.name.slice(0, 1).toUpperCase()}
-                </span>
-              ))}
-            </div>
           </div>
         );
       })}
+      <div className="pawn-layer">
+        {players
+          .filter((p) => !p.bankrupt)
+          .map((player) => {
+            const pos = displayPositions.get(player.id) ?? player.position;
+            const tile = tiles.find((t) => t.index === pos);
+            if (!tile) return null;
+            const center = tileCenters.get(tile.id);
+            if (!center) return null;
+            const stack = stacks.get(pos) ?? [];
+            const stackIndex = Math.max(0, stack.indexOf(player.id));
+            const offset = pawnOffset(stackIndex);
+            const baseColor = colors.get(player.id) || playerColors[stackIndex % playerColors.length];
+            const style = center
+              ? {
+                  ["--x" as any]: `${center.x + offset.x}px`,
+                  ["--y" as any]: `${center.y + offset.y}px`,
+                  background: baseColor
+                }
+              : undefined;
+            const isActive = player.id === currentPlayerId;
+            const isMoving = animatingPlayerId === player.id;
+            const isMeHere = player.id === meId;
+            return (
+              <div
+                key={player.id}
+                className={`floating-pawn ${isActive ? "active" : ""} ${isMoving ? "moving" : ""} ${isMeHere ? "me" : ""}`}
+                style={style}
+                title={player.name}
+              >
+                <span className="initial">{player.name.slice(0, 1).toUpperCase()}</span>
+              </div>
+            );
+          })}
+      </div>
     </div>
   );
 }
@@ -892,6 +1190,7 @@ function TileOverlay({
   currentTile,
   eventCard,
   isMyTurn,
+  isAnimating,
   onBuy,
   onPass,
   onDismissEvent
@@ -900,6 +1199,7 @@ function TileOverlay({
   currentTile?: Tile;
   eventCard?: { title: string; description?: string; logId?: string } | null;
   isMyTurn: boolean;
+  isAnimating: boolean;
   onBuy: () => void;
   onPass: () => void;
   onDismissEvent: () => void;
@@ -921,10 +1221,10 @@ function TileOverlay({
           Preço {awaitingTile.price} · aluguel base {awaitingTile.baseRent}
         </p>
         <div className="actions-inline">
-          <button className="primary" disabled={!isMyTurn} onClick={onBuy}>
+          <button className="primary" disabled={!isMyTurn || isAnimating} onClick={onBuy}>
             Comprar
           </button>
-          <button className="ghost" disabled={!isMyTurn} onClick={onPass}>
+          <button className="ghost" disabled={!isMyTurn || isAnimating} onClick={onPass}>
             Passar compra
           </button>
         </div>
@@ -939,7 +1239,7 @@ function TileOverlay({
         <h4>{eventCard.title}</h4>
         <p className="muted small">{eventCard.description || "Carta sorteada. Veja o log para detalhes."}</p>
         <div className="actions-inline">
-          <button className="primary" onClick={onDismissEvent}>
+          <button className="primary" onClick={onDismissEvent} disabled={isAnimating}>
             Ok, continuar
           </button>
         </div>
@@ -1117,6 +1417,46 @@ function logBadge(message: string) {
   if (lower.includes("recebeu") || lower.includes("bonus") || lower.includes("bônus")) return { label: "Recebido", tone: "event" };
   if (lower.includes("carta")) return { label: "Carta", tone: "event" };
   return null;
+}
+
+function buildStepPath(start: number, steps: number, size: number) {
+  if (size <= 0 || steps === 0) return [];
+  const direction = steps >= 0 ? 1 : -1;
+  const count = Math.abs(steps);
+  const path: number[] = [];
+  for (let i = 1; i <= count; i++) {
+    let next = (start + direction * i) % size;
+    if (next < 0) next += size;
+    path.push(next);
+  }
+  return path;
+}
+
+function wrappedDelta(from: number, to: number, size: number) {
+  if (size === 0) return 0;
+  const forward = ((to - from) % size + size) % size;
+  const backward = -(((from - to) % size + size) % size);
+  return Math.abs(backward) < forward ? backward : forward;
+}
+
+function pawnOffset(index: number) {
+  const offsets = [
+    { x: 0, y: 0 },
+    { x: 16, y: 0 },
+    { x: -16, y: 0 },
+    { x: 0, y: 16 },
+    { x: 0, y: -16 },
+    { x: 14, y: 14 },
+    { x: -14, y: -14 },
+    { x: 14, y: -14 },
+    { x: -14, y: 14 }
+  ];
+  const safeIndex = index >= 0 ? index % offsets.length : 0;
+  return offsets[safeIndex];
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function buildCoords(size: number) {
