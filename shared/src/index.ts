@@ -118,6 +118,15 @@ export type GameState = {
   winnerId?: string;
 };
 
+export type RoomSummary = {
+  id: string;
+  status: GameStatus;
+  playerCount: number;
+  connectedCount: number;
+  hostName?: string;
+  players: Array<Pick<PlayerState, "id" | "name" | "disconnected">>;
+};
+
 export type ClientMessage =
   | { type: "createRoom"; playerName: string; settings?: Partial<GameSettings> }
   | { type: "joinRoom"; roomId: string; playerName: string }

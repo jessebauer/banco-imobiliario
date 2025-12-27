@@ -2,7 +2,7 @@ import express from "express";
 import cors from "cors";
 import { WebSocketServer, WebSocket } from "ws";
 import { nanoid } from "nanoid";
-import { ClientMessage, GameState, ServerMessage } from "@banco/shared";
+import { ClientMessage, GameState, RoomSummary, ServerMessage } from "@banco/shared";
 import { GameEngine } from "./engine";
 
 type RoomContext = {
@@ -14,6 +14,7 @@ const rooms = new Map<string, RoomContext>();
 const session = new Map<WebSocket, { roomId?: string; playerId?: string }>();
 
 const PORT = process.env.PORT ? Number(process.env.PORT) : 4000;
+const HOST = process.env.HOST ?? "0.0.0.0";
 
 const app = express();
 app.use(cors());
@@ -23,8 +24,34 @@ app.get("/health", (_req, res) => {
   res.json({ ok: true });
 });
 
-const server = app.listen(PORT, () => {
-  console.log(`HTTP server ouvindo em http://localhost:${PORT}`);
+app.get("/rooms", (_req, res) => {
+  const summaries: RoomSummary[] = Array.from(rooms.entries())
+    .map(([id, ctx]) => {
+      const players = ctx.engine.state.players
+        .map((p) => ({
+          id: p.id,
+          name: p.name,
+          disconnected: p.disconnected
+        }))
+        .filter((p) => ctx.connections.has(p.id) && !p.disconnected);
+      const hostName = ctx.engine.state.players.find((p) => p.id === ctx.engine.state.hostId)?.name;
+      return {
+        id,
+        status: ctx.engine.state.status,
+        playerCount: ctx.engine.state.players.length,
+        connectedCount: players.length,
+        hostName,
+        players
+      };
+    })
+    .filter((room) => room.connectedCount > 0 && room.status !== "finished");
+
+  res.json({ rooms: summaries });
+});
+
+const server = app.listen(PORT, HOST, () => {
+  const hostLabel = HOST === "0.0.0.0" ? "0.0.0.0" : HOST;
+  console.log(`HTTP server ouvindo em http://${hostLabel}:${PORT}`);
 });
 
 const wss = new WebSocketServer({ server });
@@ -137,7 +164,21 @@ function handleJoinRoom(ws: WebSocket, message: Extract<ClientMessage, { type: "
     safeSend(ws, { type: "error", message: "Partida já iniciada" });
     return;
   }
-  const player = room.engine.addPlayer(message.playerName);
+  const existing = room.engine.state.players.find(
+    (p) => p.name.toLowerCase() === message.playerName.toLowerCase()
+  );
+
+  if (existing) {
+    const isConnected = room.connections.get(existing.id)?.readyState === WebSocket.OPEN && !existing.disconnected;
+    if (isConnected) {
+      safeSend(ws, { type: "error", message: "Já existe um jogador com este nome na sala." });
+      return;
+    }
+    existing.disconnected = false;
+  }
+
+  const player = existing ?? room.engine.addPlayer(message.playerName);
+
   room.connections.set(player.id, ws);
   session.set(ws, { roomId: message.roomId, playerId: player.id });
   safeSend(ws, { type: "joined", playerId: player.id, roomId: message.roomId });

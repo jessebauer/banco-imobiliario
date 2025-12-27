@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ClientMessage,
   DiceRoll,
@@ -6,6 +6,7 @@ import {
   EVENT_CARDS,
   PlayerState,
   PropertyTile,
+  RoomSummary,
   ServerMessage,
   Tile
 } from "@banco/shared";
@@ -31,7 +32,11 @@ type ActionOption = {
 
 export default function App() {
   const [mode, setMode] = useState<ConnectionMode>("host");
-  const [serverUrl, setServerUrl] = useState("ws://localhost:4000");
+  const [serverUrl, setServerUrl] = useState(() => {
+    if (typeof window === "undefined") return "ws://localhost:4000";
+    const host = window.location.hostname || "localhost";
+    return `ws://${host}:4000`;
+  });
   const [name, setName] = useState(defaultName);
   const [roomInput, setRoomInput] = useState("");
   const [game, setGame] = useState<GameState | null>(null);
@@ -41,6 +46,9 @@ export default function App() {
   const [info, setInfo] = useState<string | null>(null);
   const [lastRoll, setLastRoll] = useState<DiceRoll | null>(null);
   const [connecting, setConnecting] = useState(false);
+  const [availableRooms, setAvailableRooms] = useState<RoomSummary[]>([]);
+  const [loadingRooms, setLoadingRooms] = useState(false);
+  const [roomsError, setRoomsError] = useState<string | null>(null);
   const [createdRoomId, setCreatedRoomId] = useState<string | null>(null);
   const [lastMovedTileId, setLastMovedTileId] = useState<string | null>(null);
   const [seenEventLogId, setSeenEventLogId] = useState<string | null>(null);
@@ -87,14 +95,37 @@ export default function App() {
     return () => window.removeEventListener("resize", handler);
   }, []);
 
+  const httpServerBase = useMemo(() => {
+    if (!serverUrl) return "";
+    if (serverUrl.startsWith("ws://") || serverUrl.startsWith("wss://")) {
+      return serverUrl.replace("ws://", "http://").replace("wss://", "https://");
+    }
+    if (serverUrl.startsWith("http://") || serverUrl.startsWith("https://")) {
+      return serverUrl;
+    }
+    return `http://${serverUrl}`;
+  }, [serverUrl]);
+
   const connect = (payload: ClientMessage, targetServer = serverUrl) => {
     setConnecting(true);
     setError(null);
+    if (!targetServer.startsWith("ws://") && !targetServer.startsWith("wss://")) {
+      setConnecting(false);
+      setError("Endereço do servidor deve começar com ws:// ou wss://");
+      return;
+    }
     if (ws) {
       suppressReconnectRef.current = true;
       ws.close();
     }
-    const socket = new WebSocket(targetServer);
+    let socket: WebSocket;
+    try {
+      socket = new WebSocket(targetServer);
+    } catch (err: any) {
+      setConnecting(false);
+      setError("Não foi possível abrir conexão com o servidor. Verifique o endereço e a rede.");
+      return;
+    }
     setWs(socket);
     socket.onopen = () => {
       suppressReconnectRef.current = false;
@@ -128,13 +159,21 @@ export default function App() {
         setConnecting(false);
       }
     };
+    socket.onerror = () => {
+      setError("Falha ao comunicar com o servidor. Confira IP/porta e se o servidor está rodando.");
+      setConnecting(false);
+    };
     socket.onclose = () => {
       if (suppressReconnectRef.current) {
         suppressReconnectRef.current = false;
         return;
       }
       setConnecting(false);
-      setInfo("Conexão perdida. Tentando reconectar...");
+      if (reconnectRef.current) {
+        setInfo("Conexão perdida. Tentando reconectar...");
+      } else {
+        setError("Conexão perdida. Confira se o servidor está acessível na rede.");
+      }
       if (reconnectRef.current) {
         setTimeout(() => {
           attemptReconnect(reconnectRef.current!);
@@ -157,6 +196,48 @@ export default function App() {
       return;
     }
     connect({ type: "joinRoom", roomId: roomInput.trim(), playerName: name });
+  };
+
+  const fetchRooms = useCallback(async () => {
+    if (!httpServerBase) return;
+    setRoomsError(null);
+    setLoadingRooms(true);
+    try {
+      const res = await fetch(`${httpServerBase}/rooms`);
+      if (!res.ok) {
+        throw new Error("Não foi possível listar as salas.");
+      }
+      const data = (await res.json()) as { rooms?: RoomSummary[] };
+      const rooms = (data.rooms ?? []).filter((room) => room.connectedCount > 0);
+      setAvailableRooms(rooms);
+    } catch (err: any) {
+      const friendly =
+        err instanceof Error && err.message.includes("Failed to fetch")
+          ? "Não foi possível carregar as salas. Confira o endereço do servidor."
+          : err?.message ?? "Erro ao buscar salas.";
+      setRoomsError(friendly);
+      setAvailableRooms([]);
+    } finally {
+      setLoadingRooms(false);
+    }
+  }, [httpServerBase]);
+
+  useEffect(() => {
+    if (mode !== "join") {
+      setRoomsError(null);
+      setAvailableRooms([]);
+      return;
+    }
+    if (!httpServerBase) return;
+    fetchRooms();
+    if (typeof window === "undefined") return;
+    const interval = window.setInterval(fetchRooms, 5000);
+    return () => window.clearInterval(interval);
+  }, [mode, fetchRooms, httpServerBase]);
+
+  const handleQuickJoin = (roomId: string) => {
+    setRoomInput(roomId);
+    connect({ type: "joinRoom", roomId, playerName: name });
   };
 
   const send = (message: ClientMessage) => {
@@ -189,14 +270,10 @@ export default function App() {
   }, [game, lastRoll]);
 
   const joinUrl = useMemo(() => {
-    if (!session?.roomId) return "";
-    const base =
-      serverUrl.startsWith("ws://") || serverUrl.startsWith("wss://")
-        ? serverUrl.replace("ws://", "http://").replace("wss://", "https://")
-        : serverUrl;
-    const url = `${base}?room=${session.roomId}&server=${encodeURIComponent(serverUrl)}`;
+    if (!session?.roomId || !httpServerBase) return "";
+    const url = `${httpServerBase}?room=${session.roomId}&server=${encodeURIComponent(serverUrl)}`;
     return url;
-  }, [serverUrl, session]);
+  }, [httpServerBase, serverUrl, session]);
 
   const coords = useMemo(() => buildCoords(6), []);
 
@@ -326,6 +403,77 @@ export default function App() {
               </div>
             )}
           </div>
+          {mode === "join" && (
+            <div className="rooms-panel">
+              <div className="rooms-header">
+                <div>
+                  <p className="eyebrow">Salas com jogadores</p>
+                  <p className="muted">Clique para preencher o código e entrar direto.</p>
+                </div>
+                <button className="ghost" onClick={fetchRooms} disabled={loadingRooms}>
+                  {loadingRooms ? "Atualizando..." : "Atualizar lista"}
+                </button>
+              </div>
+              {roomsError && <span className="error">{roomsError}</span>}
+              {loadingRooms && !availableRooms.length ? (
+                <p className="muted">Carregando salas abertas...</p>
+              ) : availableRooms.length === 0 ? (
+                <p className="muted">Nenhuma sala com jogadores online neste servidor.</p>
+              ) : (
+                <div className="rooms-grid">
+                  {availableRooms.map((room) => {
+                    const isJoinable = room.status === "lobby";
+                    const statusLabel =
+                      room.status === "lobby"
+                        ? "Sala aberta"
+                        : room.status === "active"
+                          ? "Partida em andamento"
+                          : "Encerrada";
+                    const visiblePlayers = room.players.slice(0, 5);
+                    const hiddenCount = room.players.length - visiblePlayers.length;
+                    return (
+                      <button
+                        key={room.id}
+                        className={`room-card ${isJoinable ? "" : "disabled"}`}
+                        onClick={() => handleQuickJoin(room.id)}
+                        disabled={!isJoinable || connecting}
+                        title={isJoinable ? "Entrar rapidamente" : "Partida já iniciada"}
+                      >
+                        <div className="room-card-head">
+                          <div>
+                            <p className="muted small">Sala</p>
+                            <div className="room-code">{room.id}</div>
+                          </div>
+                          <div className="room-chip">
+                            <span className={`chip ${room.status}`}>{statusLabel}</span>
+                            <span className="badge">
+                              {room.connectedCount} jogador{room.connectedCount === 1 ? "" : "es"} online
+                            </span>
+                          </div>
+                        </div>
+                        <div className="room-meta">
+                          <span className="muted">
+                            Anfitrião: <strong>{room.hostName ?? "Indefinido"}</strong>
+                          </span>
+                        </div>
+                        <div className="pill-row">
+                          {visiblePlayers.map((p) => (
+                            <span key={p.id} className="pill success">
+                              {p.name}
+                            </span>
+                          ))}
+                          {hiddenCount > 0 && <span className="pill subtle">+{hiddenCount}</span>}
+                        </div>
+                        <p className="room-footer">
+                          {isJoinable ? "Entrar com 1 clique" : "Partida já iniciada"}
+                        </p>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
           <div className="actions">
             <button onClick={mode === "host" ? handleHost : handleJoin} className="primary" disabled={connecting}>
               {mode === "host" ? "Criar sala" : "Entrar na sala"}
