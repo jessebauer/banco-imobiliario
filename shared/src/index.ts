@@ -61,6 +61,7 @@ export type EventCard = {
     money?: number;
     move?: number;
     toPosition?: number;
+    goToJail?: boolean;
   };
 };
 
@@ -130,6 +131,7 @@ export type RoomSummary = {
 export type ClientMessage =
   | { type: "createRoom"; playerName: string; settings?: Partial<GameSettings> }
   | { type: "joinRoom"; roomId: string; playerName: string }
+  | { type: "spectate"; roomId: string }
   | { type: "reconnect"; roomId: string; playerId: string }
   | { type: "startGame" }
   | { type: "finishGame" }
@@ -142,6 +144,7 @@ export type ClientMessage =
 export type ServerMessage =
   | { type: "roomCreated"; roomId: string }
   | { type: "joined"; playerId: string; roomId: string }
+  | { type: "spectating"; roomId: string }
   | { type: "state"; state: GameState }
   | { type: "error"; message: string }
   | { type: "log"; entry: LogEntry }
@@ -179,6 +182,12 @@ export const EVENT_CARDS: EventCard[] = [
     title: "Volte 2 casas",
     description: "Retrocede 2 casas",
     effect: { move: -2 }
+  },
+  {
+    id: "prisao",
+    title: "Vá para a prisão",
+    description: "Vá direto para a prisão. Não passe pelo início, não receba bônus.",
+    effect: { goToJail: true }
   }
 ];
 

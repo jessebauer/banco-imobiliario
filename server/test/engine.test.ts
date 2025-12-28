@@ -55,9 +55,73 @@ describe("GameEngine rules", () => {
 
   it("blocks paying bail when player lacks cash", () => {
     const player = engine.state.players.find((p) => p.id === hostId)!;
-    player.inJailTurns = 2;
-    player.money = 50;
+    player.inJailTurns = 3;
+    player.money = 40;
     expect(() => engine.payBail(hostId)).toThrow(/Dinheiro insuficiente/);
+    expect(player.inJailTurns).toBe(3);
+  });
+
+  it("lets player leave jail by rolling doubles", () => {
+    const player = engine.state.players.find((p) => p.id === hostId)!;
+    const jailIndex = engine.state.tiles.findIndex((t) => t.type === "jail");
+    player.position = jailIndex;
+    player.inJailTurns = 3;
+
+    vi.spyOn(Math, "random")
+      .mockReturnValueOnce(0) // die 1 -> 1
+      .mockReturnValueOnce(0); // die 2 -> 1
+
+    engine.rollDice(hostId);
+    expect(player.inJailTurns).toBe(0);
+    expect(player.position).toBe((jailIndex + 2) % engine.state.tiles.length);
+  });
+
+  it("sends player to jail when drawing a go-to-jail card", () => {
+    const player = engine.state.players.find((p) => p.id === hostId)!;
+    const jailIndex = engine.state.tiles.findIndex((t) => t.type === "jail");
+    player.position = 0;
+    engine.state.deck = [
+      { id: "carta-prisao", title: "Carta prisão", description: "Vá para a prisão", effect: { goToJail: true } }
+    ];
+
+    vi.spyOn(Math, "random").mockReturnValue(0.2); // 2 + 2 = 4 (event tile)
+    engine.rollDice(hostId);
+
+    expect(player.position).toBe(jailIndex);
+    expect(player.inJailTurns).toBe(3);
+    expect(player.money).toBe(engine.state.settings.startingCash);
+  });
+
+  it("forces bail after three failed jail turns", () => {
+    const player = engine.state.players.find((p) => p.id === hostId)!;
+    const jailIndex = engine.state.tiles.findIndex((t) => t.type === "jail");
+    player.position = jailIndex;
+    player.inJailTurns = 3;
+    const startMoney = player.money;
+
+    vi.spyOn(Math, "random")
+      .mockReturnValueOnce(0) // 1
+      .mockReturnValueOnce(0.2) // 2 -> total 3, stay
+      .mockReturnValueOnce(0.2) // 2
+      .mockReturnValueOnce(0.4) // 3 -> total 5, stay
+      .mockReturnValueOnce(0.35) // 3
+      .mockReturnValueOnce(0.55); // 4 -> total 7, pay bail and move
+
+    engine.rollDice(hostId);
     expect(player.inJailTurns).toBe(2);
+    expect(player.position).toBe(jailIndex);
+    engine.state.turn.rolled = false;
+    engine.state.turn.dice = undefined;
+
+    engine.rollDice(hostId);
+    expect(player.inJailTurns).toBe(1);
+    expect(player.position).toBe(jailIndex);
+    engine.state.turn.rolled = false;
+    engine.state.turn.dice = undefined;
+
+    engine.rollDice(hostId);
+    expect(player.inJailTurns).toBe(0);
+    expect(player.money).toBe(startMoney - 50);
+    expect(player.position).toBe((jailIndex + 7) % engine.state.tiles.length);
   });
 });

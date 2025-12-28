@@ -13,7 +13,8 @@ import {
 } from "@banco/shared";
 import { nanoid } from "nanoid";
 
-const BAIL_COST = 100;
+const BAIL_COST = 50;
+const MAX_JAIL_TURNS = 3;
 
 export class GameEngine {
   state: GameState;
@@ -94,9 +95,9 @@ export class GameEngine {
     this.ensureActivePlayer(playerId);
     const player = this.getPlayer(playerId);
     if (!player || player.bankrupt) throw new Error("Jogador inválido");
-    if (player.inJailTurns > 0) throw new Error("Você está preso. Pague fiança ou espere o turno acabar.");
     if (this.state.turn.rolled) throw new Error("Dados já foram rolados neste turno.");
     if (this.state.turn.awaitingPurchase) throw new Error("Decida comprar ou passar a propriedade antes.");
+    const wasInJail = player.inJailTurns > 0;
 
     const roll: DiceRoll = {
       values: [rollDie(), rollDie()],
@@ -106,6 +107,42 @@ export class GameEngine {
     roll.total = roll.values[0] + roll.values[1];
     this.state.turn.dice = roll;
     this.state.turn.rolled = true;
+
+    const isDouble = roll.values[0] === roll.values[1];
+    if (wasInJail) {
+      if (isDouble) {
+        player.inJailTurns = 0;
+        this.log(`${player.name} tirou duplo e saiu da prisão.`);
+        this.movePlayer(player, roll.total);
+        this.log(`${player.name} rolou ${roll.values[0]} + ${roll.values[1]} = ${roll.total}`);
+        const tile = this.state.tiles[player.position];
+        this.resolveTile(player, tile);
+        this.checkVictory();
+        return roll;
+      }
+
+      if (player.inJailTurns === 1) {
+        this.chargeBank(
+          player,
+          BAIL_COST,
+          `${player.name} pagou fiança (${BAIL_COST}) após ${MAX_JAIL_TURNS} turnos na prisão.`
+        );
+        if (player.bankrupt) return roll;
+        player.inJailTurns = 0;
+        this.movePlayer(player, roll.total);
+        this.log(`${player.name} rolou ${roll.values[0]} + ${roll.values[1]} = ${roll.total}`);
+        const tile = this.state.tiles[player.position];
+        this.resolveTile(player, tile);
+        this.checkVictory();
+        return roll;
+      }
+
+      player.inJailTurns -= 1;
+      this.log(
+        `${player.name} rolou ${roll.values[0]} + ${roll.values[1]} = ${roll.total}, não tirou duplo e segue preso (${player.inJailTurns} tentativas restantes).`
+      );
+      return roll;
+    }
 
     this.movePlayer(player, roll.total);
     this.log(`${player.name} rolou ${roll.values[0]} + ${roll.values[1]} = ${roll.total}`);
@@ -146,6 +183,7 @@ export class GameEngine {
     const player = this.getPlayer(playerId);
     if (!player) throw new Error("Jogador inválido");
     if (player.inJailTurns <= 0) throw new Error("Você não está preso");
+    if (this.state.turn.rolled) throw new Error("Fiança só pode ser paga no início do turno.");
     if (player.money < BAIL_COST) throw new Error("Dinheiro insuficiente para pagar fiança");
     player.money -= BAIL_COST;
     player.inJailTurns = 0;
@@ -160,12 +198,12 @@ export class GameEngine {
     }
     const player = this.getPlayer(playerId);
     if (!player) throw new Error("Jogador inválido");
-    if (!this.state.turn.rolled && player.inJailTurns === 0) {
-      throw new Error("Role os dados antes de finalizar o turno.");
-    }
-    if (player.inJailTurns > 0) {
-      player.inJailTurns -= 1;
-      if (player.inJailTurns === 0) this.log(`${player.name} cumpriu a pena e está livre.`);
+    if (!this.state.turn.rolled) {
+      throw new Error(
+        player.inJailTurns > 0
+          ? "Tente sair da prisão (role os dados ou pague fiança) antes de finalizar o turno."
+          : "Role os dados antes de finalizar o turno."
+      );
     }
     this.advanceTurn();
   }
@@ -241,6 +279,10 @@ export class GameEngine {
       }
       this.checkBankruptcy(player);
     }
+    if (card.effect.goToJail) {
+      this.sendToJail(player);
+      return;
+    }
     if (card.effect.move) {
       this.movePlayer(player, card.effect.move);
       this.resolveTile(player, this.state.tiles[player.position], true);
@@ -254,7 +296,7 @@ export class GameEngine {
   private sendToJail(player: PlayerState) {
     const jailIndex = this.state.tiles.findIndex((t) => t.type === "jail");
     player.position = jailIndex >= 0 ? jailIndex : player.position;
-    player.inJailTurns = 2;
+    player.inJailTurns = MAX_JAIL_TURNS;
     this.log(`${player.name} foi para a prisão.`);
   }
 

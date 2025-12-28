@@ -72,14 +72,21 @@ export default function App() {
   const animationCancelRef = useRef<{ cancelled: boolean } | null>(null);
   const measureRafRef = useRef<number | null>(null);
   const reconnectRef = useRef<{ roomId: string; playerId: string; server: string } | null>(null);
+  const spectateRef = useRef<{ roomId: string; server: string } | null>(null);
   const eventHydratedRef = useRef(false);
   const suppressReconnectRef = useRef(false);
+  const [isSpectator, setIsSpectator] = useState(false);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const room = params.get("room");
     const server = params.get("server");
     const presetName = params.get("name");
+    const view = params.get("view");
+    if (view === "broadcast" || view === "spectate" || view === "display") {
+      setIsSpectator(true);
+      setMode("join");
+    }
     if (room) {
       setMode("join");
       setRoomInput(room);
@@ -100,6 +107,15 @@ export default function App() {
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
   }, [theme]);
+
+  useEffect(() => {
+    if (!isSpectator) return;
+    if (ws || connecting) return;
+    const roomId = roomInput.trim();
+    if (!roomId) return;
+    spectateRef.current = { roomId, server: serverUrl };
+    connect({ type: "spectate", roomId }, serverUrl);
+  }, [connecting, isSpectator, roomInput, serverUrl, ws]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -128,6 +144,10 @@ export default function App() {
   const connect = (payload: ClientMessage, targetServer = serverUrl) => {
     setConnecting(true);
     setError(null);
+    const isSpectatorConnect = payload.type === "spectate";
+    if (isSpectatorConnect) {
+      setSession(null);
+    }
     if (!targetServer.startsWith("ws://") && !targetServer.startsWith("wss://")) {
       setConnecting(false);
       setError("Endereço do servidor deve começar com ws:// ou wss://");
@@ -149,9 +169,12 @@ export default function App() {
     socket.onopen = () => {
       suppressReconnectRef.current = false;
       socket.send(JSON.stringify(payload));
-      setInfo("Conectado. Sincronizando estado...");
+      setInfo(isSpectatorConnect ? "Transmitindo sala..." : "Conectado. Sincronizando estado...");
       if (payload.type === "createRoom") {
         reconnectRef.current = null;
+      }
+      if (isSpectatorConnect) {
+        spectateRef.current = { roomId: payload.roomId, server: targetServer };
       }
     };
     socket.onmessage = (event) => {
@@ -164,6 +187,10 @@ export default function App() {
         setSession(newSession);
         reconnectRef.current = { roomId: msg.roomId, playerId: msg.playerId, server: targetServer };
         setInfo(`Conectado à sala ${msg.roomId}`);
+        setConnecting(false);
+      }
+      if (msg.type === "spectating") {
+        setInfo(`Transmitindo sala ${msg.roomId}`);
         setConnecting(false);
       }
       if (msg.type === "state") {
@@ -188,15 +215,24 @@ export default function App() {
         return;
       }
       setConnecting(false);
-      if (reconnectRef.current) {
-        setInfo("Conexão perdida. Tentando reconectar...");
+      if (isSpectatorConnect) {
+        if (spectateRef.current) {
+          setInfo("Conexão perdida. Tentando retomar transmissão...");
+          setTimeout(() => connect({ type: "spectate", roomId: spectateRef.current!.roomId }, spectateRef.current!.server), 1200);
+        } else {
+          setError("Transmissão encerrada. Verifique sala e servidor.");
+        }
       } else {
-        setError("Conexão perdida. Confira se o servidor está acessível na rede.");
-      }
-      if (reconnectRef.current) {
-        setTimeout(() => {
-          attemptReconnect(reconnectRef.current!);
-        }, 1200);
+        if (reconnectRef.current) {
+          setInfo("Conexão perdida. Tentando reconectar...");
+        } else {
+          setError("Conexão perdida. Confira se o servidor está acessível na rede.");
+        }
+        if (reconnectRef.current) {
+          setTimeout(() => {
+            attemptReconnect(reconnectRef.current!);
+          }, 1200);
+        }
       }
     };
   };
@@ -356,6 +392,13 @@ export default function App() {
     const url = `${httpServerBase}?room=${session.roomId}&server=${encodeURIComponent(serverUrl)}`;
     return url;
   }, [httpServerBase, serverUrl, session]);
+
+  const broadcastUrl = useMemo(() => {
+    const room = session?.roomId || createdRoomId || roomInput;
+    if (typeof window === "undefined" || !room) return "";
+    const base = window.location.origin;
+    return `${base}?view=broadcast&room=${room}&server=${encodeURIComponent(serverUrl)}`;
+  }, [createdRoomId, roomInput, serverUrl, session?.roomId]);
 
   const coords = useMemo(() => buildCoords(6), []);
 
@@ -540,8 +583,13 @@ export default function App() {
     if (isMyTurn && awaitingTile) {
       actions.push({ label: "Passar compra", action: () => send({ type: "passPurchase" }), icon: "↩", disabled: isAnimatingMove });
     }
-    if (isMyTurn && me?.inJailTurns) {
-      actions.push({ label: "Pagar fiança", action: () => send({ type: "payBail" }), icon: "🪙", disabled: isAnimatingMove });
+    if (isMyTurn && me?.inJailTurns && !game?.turn.rolled) {
+      actions.push({
+        label: "Pagar fiança (50)",
+        action: () => send({ type: "payBail" }),
+        icon: "🪙",
+        disabled: isAnimatingMove
+      });
     }
     if (game?.hostId === session?.playerId && game?.status === "active") {
       actions.push({
@@ -569,6 +617,30 @@ export default function App() {
   const handleFinishNetWorth = () => {
     send({ type: "finishGame" });
   };
+
+  if (isSpectator) {
+    return (
+      <BroadcastView
+        game={game}
+        coords={coords}
+        displayPositions={displayPositions}
+        tileCenters={tileCenters}
+        registerTileRef={registerTileRef}
+        boardRef={boardRef}
+        colors={playerColorMap}
+        statusLabel={statusLabel}
+        info={info}
+        error={error}
+        connecting={connecting}
+        lastLogEntry={lastLogEntry}
+        lastRoll={lastRoll}
+        serverUrl={serverUrl}
+        roomCode={game?.roomId || roomInput}
+        lastMovedTileId={lastMovedTileId || undefined}
+        animatingPlayerId={animatingPlayerId}
+      />
+    );
+  }
 
   return (
     <div className={`page ${isMobile ? "is-mobile" : ""}`}>
@@ -723,6 +795,16 @@ export default function App() {
                   <QRCode value={joinUrl || `${serverUrl}?room=${createdRoomId}`} size={96} />
                 </div>
               </div>
+              {broadcastUrl && (
+                <div className="actions" style={{ marginTop: 12 }}>
+                  <a className="ghost" href={broadcastUrl} target="_blank" rel="noreferrer">
+                    Abrir transmissão (TV)
+                  </a>
+                  <p className="muted small">
+                    Abre uma visão só leitura para enviar via Chromecast/Smart TV com o status ao vivo.
+                  </p>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -903,6 +985,213 @@ export default function App() {
           isMyTurn={isMyTurn}
         />
       )}
+    </div>
+  );
+}
+
+function BroadcastView({
+  game,
+  coords,
+  displayPositions,
+  tileCenters,
+  registerTileRef,
+  boardRef,
+  colors,
+  statusLabel,
+  info,
+  error,
+  connecting,
+  lastLogEntry,
+  lastRoll,
+  serverUrl,
+  roomCode,
+  lastMovedTileId,
+  animatingPlayerId
+}: {
+  game: GameState | null;
+  coords: { row: number; col: number }[];
+  displayPositions: Map<string, number>;
+  tileCenters: Map<string, { x: number; y: number }>;
+  registerTileRef?: (tileId: string, el: HTMLDivElement | null) => void;
+  boardRef?: React.RefObject<HTMLDivElement>;
+  colors: Map<string, string>;
+  statusLabel: string;
+  info: string | null;
+  error: string | null;
+  connecting: boolean;
+  lastLogEntry: GameState["log"][number] | null;
+  lastRoll: DiceRoll | null;
+  serverUrl: string;
+  roomCode?: string | null;
+  lastMovedTileId?: string;
+  animatingPlayerId?: string | null;
+}) {
+  const players = game?.players ?? [];
+  const turnPlayerId = game?.turn.currentPlayerId;
+  const orderedPlayers = useMemo(
+    () =>
+      [...players].sort((a, b) => {
+        if (a.bankrupt !== b.bankrupt) return Number(a.bankrupt) - Number(b.bankrupt);
+        if (a.id === turnPlayerId) return -1;
+        if (b.id === turnPlayerId) return 1;
+        return b.money - a.money;
+      }),
+    [players, turnPlayerId]
+  );
+  const propertiesByPlayer = useMemo(() => {
+    const map = new Map<string, PropertyTile[]>();
+    game?.tiles
+      .filter((t) => t.type === "property")
+      .forEach((t) => {
+        const prop = t as PropertyTile;
+        if (!prop.ownerId) return;
+        const list = map.get(prop.ownerId) ?? [];
+        list.push(prop);
+        map.set(prop.ownerId, list);
+      });
+    return map;
+  }, [game?.tiles]);
+  const turnPlayer = turnPlayerId ? game?.players.find((p) => p.id === turnPlayerId) : null;
+  const turnTile = turnPlayer && game ? game.tiles.find((t) => t.index === turnPlayer.position) : null;
+  const recentLog = game?.log.slice(-6).reverse() ?? [];
+
+  return (
+    <div className="broadcast-page">
+      <header className="broadcast-hero">
+        <div>
+          <p className="eyebrow">Transmissão</p>
+          <h1>Banco Imobiliário · Sala {roomCode || "—"}</h1>
+          <p className="muted">Abra este link no Chrome e faça cast para a TV. Status sempre ao vivo.</p>
+          <div className="top-actions">
+            <span className={`chip ${game?.status ?? "lobby"}`}>{statusLabel}</span>
+            <span className="badge">
+              {players.length} jogador{players.length === 1 ? "" : "es"}
+            </span>
+            <span className="pill subtle">{serverUrl}</span>
+          </div>
+          {info && <div className="info">{info}</div>}
+          {error && <div className="error">{error}</div>}
+          {connecting && <div className="muted small">Conectando à sala...</div>}
+        </div>
+        {turnPlayer && (
+          <div className="turn-card hero">
+            <p className="muted small">Turno</p>
+            <h3>{turnPlayer.name}</h3>
+            <p className="muted">{turnTile ? turnTile.name : `Casa ${turnPlayer.position}`}</p>
+            <div className="pill-row">
+              <span className="pill subtle">💰 {turnPlayer.money}</span>
+              <span className="pill subtle">
+                🚓 {turnPlayer.inJailTurns ? `${turnPlayer.inJailTurns}/3 na prisão` : "Livre"}
+              </span>
+              {lastRoll && (
+                <span className="pill subtle">
+                  🎲 {lastRoll.values.join(" + ")} = {lastRoll.total}
+                </span>
+              )}
+            </div>
+          </div>
+        )}
+      </header>
+
+      <div className="broadcast-grid">
+        <div className="board-card broadcast-card">
+          {game ? (
+            <>
+              <Board
+                tiles={game.tiles}
+                coords={coords}
+                players={game.players}
+                currentPlayerId={game.turn.currentPlayerId}
+                colors={colors}
+                lastMovedTileId={lastMovedTileId}
+                displayPositions={displayPositions}
+                tileCenters={tileCenters}
+                registerTileRef={registerTileRef}
+                boardRef={boardRef}
+                animatingPlayerId={animatingPlayerId}
+              />
+              {lastRoll && <Dice roll={lastRoll} />}
+            </>
+          ) : (
+            <div className="empty">
+              Informe ?view=broadcast&room=CODIGO&server=ws://IP:4000 na URL para transmitir uma sala.
+              <p className="muted small">Servidor atual: {serverUrl}</p>
+            </div>
+          )}
+        </div>
+
+        <div className="broadcast-side">
+          <div className="spectator-players">
+            {orderedPlayers.map((player) => {
+              const props = propertiesByPlayer.get(player.id) ?? [];
+              const color = colors.get(player.id) || "#5FE3B2";
+              const moneyPct = Math.min(100, Math.max(4, (player.money / (game?.settings.startingCash || 1)) * 100));
+              const tileName = game?.tiles.find((t) => t.index === player.position)?.name ?? `Casa ${player.position}`;
+              return (
+                <div
+                  key={player.id}
+                  className={`spectator-player ${player.bankrupt ? "bankrupt" : ""} ${
+                    player.id === game?.turn.currentPlayerId ? "active" : ""
+                  }`}
+                >
+                  <div className="head">
+                    <div className="bubble" style={{ background: color }}>
+                      {player.name.slice(0, 1).toUpperCase()}
+                    </div>
+                    <div className="meta">
+                      <strong>{player.name}</strong>
+                      <p className="muted small">{tileName}</p>
+                    </div>
+                    <div className="tags">
+                      {player.bankrupt && <span className="pill danger">Falido</span>}
+                      {player.id === game?.turn.currentPlayerId && <span className="pill success">Turno</span>}
+                      {player.disconnected && <span className="pill warning">Off</span>}
+                    </div>
+                  </div>
+                  <div className="stat-line">
+                    <span>Dinheiro {player.money}</span>
+                    <span>Prisão {player.inJailTurns ? `${player.inJailTurns}/3` : "livre"}</span>
+                  </div>
+                  <div className="meter">
+                    <div className="fill" style={{ width: `${moneyPct}%`, background: color }} />
+                  </div>
+                  {props.length > 0 && (
+                    <div className="props">
+                      {props.map((p) => (
+                        <span key={p.id} className="prop" style={{ borderColor: p.color }}>
+                          {p.name}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="broadcast-log">
+            <div className="log-head">
+              <div>
+                <p className="eyebrow">Ao vivo</p>
+                <h4>Últimas ações</h4>
+              </div>
+              {lastLogEntry && <span className="pill subtle">Agora: {lastLogEntry.message}</span>}
+            </div>
+            <div className="log-list">
+              {recentLog.map((entry) => (
+                <div key={entry.id} className="log-item">
+                  <span className="dot" />
+                  <div>
+                    <p className="muted small">{new Date(entry.timestamp).toLocaleTimeString()}</p>
+                    <p>{entry.message}</p>
+                  </div>
+                </div>
+              ))}
+              {recentLog.length === 0 && <p className="muted">Sem eventos ainda.</p>}
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1321,7 +1610,7 @@ function PlayerRow({
           {isTurn && <span className="pill success">Turno</span>}
         </div>
         <div className="muted small">
-          Dinheiro: {player.money} · Posição: {player.position} · Prisão: {player.inJailTurns}
+          Dinheiro: {player.money} · Posição: {player.position} · Prisão: {player.inJailTurns ? `${player.inJailTurns}/3` : "livre"}
         </div>
         <div className="money-bar">
           <div className="money-fill" style={{ width: `${barWidth}%` }} />

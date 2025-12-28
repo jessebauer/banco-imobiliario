@@ -8,10 +8,11 @@ import { GameEngine } from "./engine";
 type RoomContext = {
   engine: GameEngine;
   connections: Map<string, WebSocket>;
+  spectators: Set<WebSocket>;
 };
 
 const rooms = new Map<string, RoomContext>();
-const session = new Map<WebSocket, { roomId?: string; playerId?: string }>();
+const session = new Map<WebSocket, { roomId?: string; playerId?: string; spectator?: boolean }>();
 
 const PORT = process.env.PORT ? Number(process.env.PORT) : 4000;
 const HOST = process.env.HOST ?? "0.0.0.0";
@@ -69,13 +70,17 @@ wss.on("connection", (ws) => {
 
   ws.on("close", () => {
     const info = session.get(ws);
-    if (!info?.roomId || !info.playerId) return;
+    if (!info?.roomId) return;
     const room = rooms.get(info.roomId);
     if (!room) return;
-    const player = room.engine.state.players.find((p) => p.id === info.playerId);
-    if (player) player.disconnected = true;
-    room.connections.delete(info.playerId);
-    broadcastState(room);
+    if (info.spectator) {
+      room.spectators.delete(ws);
+    } else if (info.playerId) {
+      const player = room.engine.state.players.find((p) => p.id === info.playerId);
+      if (player) player.disconnected = true;
+      room.connections.delete(info.playerId);
+      broadcastState(room);
+    }
     session.delete(ws);
   });
 });
@@ -87,6 +92,9 @@ function handleMessage(ws: WebSocket, message: ClientMessage) {
       break;
     case "joinRoom":
       handleJoinRoom(ws, message);
+      break;
+    case "spectate":
+      handleSpectate(ws, message.roomId);
       break;
     case "reconnect":
       handleReconnect(ws, message.roomId, message.playerId);
@@ -144,7 +152,7 @@ function handleMessage(ws: WebSocket, message: ClientMessage) {
 function handleCreateRoom(ws: WebSocket, message: Extract<ClientMessage, { type: "createRoom" }>) {
   const roomId = nanoid(6);
   const engine = new GameEngine(roomId, message.playerName, message.settings);
-  const ctx: RoomContext = { engine, connections: new Map() };
+  const ctx: RoomContext = { engine, connections: new Map(), spectators: new Set() };
   rooms.set(roomId, ctx);
   const playerId = engine.state.hostId;
   ctx.connections.set(playerId, ws);
@@ -185,6 +193,18 @@ function handleJoinRoom(ws: WebSocket, message: Extract<ClientMessage, { type: "
   broadcastState(room);
 }
 
+function handleSpectate(ws: WebSocket, roomId: string) {
+  const room = rooms.get(roomId);
+  if (!room) {
+    safeSend(ws, { type: "error", message: "Sala não encontrada" });
+    return;
+  }
+  room.spectators.add(ws);
+  session.set(ws, { roomId, spectator: true });
+  safeSend(ws, { type: "spectating", roomId });
+  safeSend(ws, { type: "state", state: room.engine.state });
+}
+
 function handleReconnect(ws: WebSocket, roomId: string, playerId: string) {
   const room = rooms.get(roomId);
   if (!room) {
@@ -222,6 +242,11 @@ function handleWithRoom(
 function broadcast(room: RoomContext, message: ServerMessage) {
   const payload = JSON.stringify(message);
   for (const ws of room.connections.values()) {
+    if (ws.readyState === ws.OPEN) {
+      ws.send(payload);
+    }
+  }
+  for (const ws of room.spectators.values()) {
     if (ws.readyState === ws.OPEN) {
       ws.send(payload);
     }
