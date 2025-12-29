@@ -9,7 +9,13 @@ import {
   LogEntry,
   PlayerState,
   PropertyTile,
-  Tile
+  Tile,
+  MAX_PROPERTY_LEVEL,
+  PROPERTY_PRICE_MULTIPLIER,
+  PROPERTY_RENT_MULTIPLIER,
+  propertyAssetValue,
+  propertyRent,
+  propertyUpgradeCost
 } from "@banco/shared";
 import { nanoid } from "nanoid";
 
@@ -42,7 +48,8 @@ export class GameEngine {
       turn: {
         currentPlayerId: hostId,
         rolled: false,
-        turnStartedAt: Date.now()
+        turnStartedAt: Date.now(),
+        awaitingUpgrade: undefined
       },
       log: [],
       deck: shuffle(EVENT_CARDS.map((c) => ({ ...c })))
@@ -166,6 +173,7 @@ export class GameEngine {
 
     player.money -= tile.price;
     tile.ownerId = player.id;
+    tile.level = 1;
     this.state.turn.awaitingPurchase = undefined;
     this.log(`${player.name} comprou ${tile.name} por ${tile.price}`);
     this.checkVictory();
@@ -176,6 +184,31 @@ export class GameEngine {
     if (!this.state.turn.awaitingPurchase) throw new Error("Nada a passar.");
     this.state.turn.awaitingPurchase = undefined;
     this.log("Compra recusada");
+  }
+
+  upgradeProperty(playerId: string, propertyId: string) {
+    this.ensureActivePlayer(playerId);
+    const player = this.getPlayer(playerId);
+    if (!player) throw new Error("Jogador não encontrado");
+    const tile = this.getProperty(propertyId);
+    if (!tile) throw new Error("Propriedade inválida");
+    if (tile.ownerId !== playerId) throw new Error("Você não é o dono desta propriedade.");
+    if (this.state.turn.awaitingUpgrade !== propertyId) {
+      throw new Error("Melhoria disponível apenas ao visitar esta propriedade neste turno.");
+    }
+    if (player.position !== tile.index) {
+      throw new Error("Você precisa estar na propriedade para melhorá-la.");
+    }
+    const level = Math.max(1, tile.level ?? 1);
+    if (level >= MAX_PROPERTY_LEVEL) throw new Error("Propriedade já está no nível máximo.");
+    const cost = propertyUpgradeCost(tile);
+    if (cost === null) throw new Error("Nenhuma melhoria disponível.");
+    if (player.money < cost) throw new Error("Dinheiro insuficiente para melhorar a propriedade.");
+    player.money -= cost;
+    tile.level = level + 1;
+    this.state.turn.awaitingUpgrade = undefined;
+    this.log(`${player.name} melhorou ${tile.name} para o nível ${tile.level} por ${cost}.`);
+    this.checkBankruptcy(player);
   }
 
   payBail(playerId: string) {
@@ -246,18 +279,29 @@ export class GameEngine {
   }
 
   private handleProperty(player: PlayerState, tile: PropertyTile) {
+    this.state.turn.awaitingUpgrade = undefined;
     if (!tile.ownerId) {
       this.state.turn.awaitingPurchase = tile.id;
       this.log(`${player.name} caiu em ${tile.name}. Pode comprar por ${tile.price}.`);
       return;
     }
     if (tile.ownerId === player.id) {
-      this.log(`${player.name} visitou sua própria propriedade (${tile.name}).`);
+      tile.level = Math.max(1, tile.level ?? 1);
+      if (tile.level < MAX_PROPERTY_LEVEL) {
+        this.state.turn.awaitingUpgrade = tile.id;
+        const cost = propertyUpgradeCost(tile);
+        this.log(
+          `${player.name} visitou ${tile.name} (nível ${tile.level}). Pode melhorar para o próximo nível por ${cost}.`
+        );
+      } else {
+        this.log(`${player.name} visitou sua própria propriedade (${tile.name}) no nível máximo (${tile.level}).`);
+      }
       return;
     }
     const owner = this.getPlayer(tile.ownerId);
     if (!owner || owner.bankrupt) return;
-    const rent = tile.baseRent;
+    tile.level = Math.max(1, tile.level ?? 1);
+    const rent = propertyRent(tile);
     player.money -= rent;
     owner.money += rent;
     this.log(`${player.name} pagou ${rent} de aluguel para ${owner.name} (${tile.name}).`);
@@ -326,6 +370,7 @@ export class GameEngine {
       rolled: false,
       turnStartedAt: Date.now(),
       awaitingPurchase: undefined,
+      awaitingUpgrade: undefined,
       dice: undefined
     };
     this.state.turnNumber = (this.state.turnNumber ?? 1) + 1;
@@ -391,7 +436,7 @@ export class GameEngine {
     if (!player) return 0;
     const propertyValue = this.state.tiles
       .filter((t) => t.type === "property" && (t as PropertyTile).ownerId === playerId)
-      .reduce((sum, t) => sum + (t as PropertyTile).price, 0);
+      .reduce((sum, t) => sum + propertyAssetValue(t as PropertyTile), 0);
     return player.money + propertyValue;
   }
 
@@ -431,7 +476,16 @@ function sanitizeSettings(settings?: Partial<GameSettings>): GameSettings {
 }
 
 function cloneBoard(board: Tile[]): Tile[] {
-  return board.map((tile) => ({ ...tile }));
+  return board.map((tile) => {
+    if (tile.type !== "property") return { ...tile };
+    const property = tile as PropertyTile;
+    return {
+      ...property,
+      price: Math.round(property.price * PROPERTY_PRICE_MULTIPLIER),
+      baseRent: Math.round(property.baseRent * PROPERTY_RENT_MULTIPLIER),
+      level: 0
+    };
+  });
 }
 
 function clamp(value: number, min: number, max: number) {

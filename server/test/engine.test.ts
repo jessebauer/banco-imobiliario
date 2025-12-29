@@ -1,6 +1,6 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import { GameEngine } from "../src/engine";
-import { PropertyTile } from "@banco/shared";
+import { PropertyTile, propertyRent } from "@banco/shared";
 
 describe("GameEngine rules", () => {
   let engine: GameEngine;
@@ -25,6 +25,7 @@ describe("GameEngine rules", () => {
     engine.buyProperty(hostId, "p2");
     const tile = engine.state.tiles.find((t) => t.id === "p2") as PropertyTile;
     expect(tile.ownerId).toBe(hostId);
+    expect(tile.level).toBe(1);
   });
 
   it("charges rent to visitors", () => {
@@ -37,8 +38,32 @@ describe("GameEngine rules", () => {
     engine.rollDice(guestId); // lands on same property
     const guest = engine.state.players.find((p) => p.id === guestId)!;
     const host = engine.state.players.find((p) => p.id === hostId)!;
-    expect(host.money).toBe(hostMoneyBefore + (engine.state.tiles.find((t) => t.id === "p2") as PropertyTile).baseRent);
+    const rent = propertyRent(engine.state.tiles.find((t) => t.id === "p2") as PropertyTile);
+    expect(host.money).toBe(hostMoneyBefore + rent);
     expect(guest.money).toBeLessThan(engine.state.settings.startingCash);
+  });
+
+  it("offers upgrade when owner lands on property and increases rent", () => {
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    engine.rollDice(hostId);
+    engine.buyProperty(hostId, "p2");
+    const tile = engine.state.tiles.find((t) => t.id === "p2") as PropertyTile;
+    const host = engine.state.players.find((p) => p.id === hostId)!;
+    const rentBefore = propertyRent(tile);
+    engine.state.turn.awaitingUpgrade = tile.id;
+    engine.state.turn.rolled = true;
+    host.position = tile.index;
+    const cost = tile.price * (tile.level ?? 1);
+    engine.upgradeProperty(hostId, tile.id);
+    expect(tile.level).toBe(2);
+    expect(propertyRent(tile)).toBeGreaterThan(rentBefore);
+    expect(host.money).toBe(engine.state.settings.startingCash - tile.price - cost);
+  });
+
+  it("doubles base price and rent from the reference board", () => {
+    const tile = engine.state.tiles.find((t) => t.id === "p1") as PropertyTile;
+    expect(tile.price).toBe(200);
+    expect(tile.baseRent).toBe(50);
   });
 
   it("applies taxes and bankruptcy", () => {

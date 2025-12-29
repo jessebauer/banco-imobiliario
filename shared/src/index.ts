@@ -19,6 +19,7 @@ export type PropertyTile = TileBase & {
   color: string;
   ownerId?: string;
   mortgaged?: boolean;
+  level?: number;
 };
 
 export type TaxTile = TileBase & {
@@ -101,6 +102,7 @@ export type TurnState = {
   currentPlayerId: string;
   dice?: DiceRoll;
   awaitingPurchase?: string;
+  awaitingUpgrade?: string;
   rolled: boolean;
   turnStartedAt: number;
 };
@@ -137,6 +139,7 @@ export type ClientMessage =
   | { type: "finishGame" }
   | { type: "rollDice" }
   | { type: "buyProperty"; propertyId: string }
+  | { type: "upgradeProperty"; propertyId: string }
   | { type: "passPurchase" }
   | { type: "endTurn" }
   | { type: "payBail" };
@@ -190,6 +193,31 @@ export const EVENT_CARDS: EventCard[] = [
     effect: { goToJail: true }
   }
 ];
+
+export const PROPERTY_PRICE_MULTIPLIER = 2;
+export const PROPERTY_RENT_MULTIPLIER = 2;
+export const MAX_PROPERTY_LEVEL = 3;
+
+export function propertyRent(tile: PropertyTile) {
+  const level = tile.ownerId ? Math.max(1, tile.level ?? 1) : 0;
+  if (level === 0) return 0;
+  return tile.baseRent * level;
+}
+
+export function propertyUpgradeCost(tile: PropertyTile) {
+  if (!tile.ownerId) return null;
+  const level = Math.max(1, tile.level ?? 1);
+  if (level >= MAX_PROPERTY_LEVEL) return null;
+  return tile.price * level;
+}
+
+export function propertyAssetValue(tile: PropertyTile) {
+  if (!tile.ownerId) return 0;
+  const level = Math.max(1, tile.level ?? 1);
+  // Purchase price + sum of upgrade costs up to current level (price * 1 + price * 2 + ...).
+  const investedMultiplier = 1 + ((level - 1) * level) / 2;
+  return tile.price * investedMultiplier;
+}
 
 export const DEFAULT_BOARD: Tile[] = [
   { id: "start", name: "Início", index: 0, type: "start", bonus: 200 },

@@ -6,6 +6,9 @@ import {
   EVENT_CARDS,
   PlayerState,
   PropertyTile,
+  MAX_PROPERTY_LEVEL,
+  propertyRent,
+  propertyUpgradeCost,
   RoomSummary,
   ServerMessage,
   Tile
@@ -76,6 +79,7 @@ export default function App() {
   const eventHydratedRef = useRef(false);
   const suppressReconnectRef = useRef(false);
   const [isSpectator, setIsSpectator] = useState(false);
+  const [broadcastBoardOnly, setBroadcastBoardOnly] = useState(false);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -336,7 +340,7 @@ export default function App() {
         measureRafRef.current = null;
       }
     };
-  }, [game?.tiles.length, isMobile, scheduleMeasure]);
+  }, [broadcastBoardOnly, game?.tiles.length, isMobile, scheduleMeasure]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -379,6 +383,10 @@ export default function App() {
     game?.turn.awaitingPurchase
       ? (game.tiles.find((t) => t.id === game.turn.awaitingPurchase) as PropertyTile | undefined)
       : undefined;
+  const awaitingUpgradeTile: PropertyTile | undefined =
+    game?.turn.awaitingUpgrade
+      ? (game.tiles.find((t) => t.id === game.turn.awaitingUpgrade) as PropertyTile | undefined)
+      : undefined;
   useEffect(() => {
     if (!game) return;
     const activePlayer = game.players.find((p) => p.id === game.turn.currentPlayerId);
@@ -403,6 +411,18 @@ export default function App() {
   const coords = useMemo(() => buildCoords(6), []);
 
   const currentTile = game?.tiles.find((t) => t.index === me?.position);
+
+  const upgradeContext = useMemo(() => {
+    if (!game || !awaitingUpgradeTile || !me) return null;
+    if (awaitingUpgradeTile.ownerId !== me.id) return null;
+    const level = Math.max(1, awaitingUpgradeTile.level ?? 1);
+    const cost = propertyUpgradeCost(awaitingUpgradeTile);
+    const canAct =
+      isMyTurn && game.turn.rolled && me.position === awaitingUpgradeTile.index && !awaitingTile;
+    const affordable = cost !== null && me.money >= cost;
+    const maxed = level >= MAX_PROPERTY_LEVEL;
+    return { tile: awaitingUpgradeTile, level, cost, affordable, canAct, maxed };
+  }, [awaitingTile, awaitingUpgradeTile, game, isMyTurn, me?.id, me?.money, me?.position]);
 
   const lastEventCard = useMemo(() => {
     const entry = game?.log.slice().reverse().find((l) => l.message.includes("puxou carta"));
@@ -569,6 +589,15 @@ export default function App() {
         icon: "💰",
         disabled: isAnimatingMove
       };
+    if (upgradeContext?.canAct && upgradeContext.cost !== null && !upgradeContext.maxed && upgradeContext.affordable) {
+      return {
+        label: `Melhorar (${upgradeContext.cost})`,
+        action: () => send({ type: "upgradeProperty", propertyId: upgradeContext.tile.id }),
+        tone: "primary",
+        icon: "🏗️",
+        disabled: isAnimatingMove
+      };
+    }
     return {
       label: "Finalizar turno",
       action: () => send({ type: "endTurn" }),
@@ -576,12 +605,21 @@ export default function App() {
       icon: "✅",
       disabled: isAnimatingMove
     };
-  }, [awaitingTile, game, isAnimatingMove, isMyTurn, send, session?.playerId]);
+  }, [awaitingTile, game, isAnimatingMove, isMyTurn, send, upgradeContext]);
 
   const secondaryActions = useMemo<ActionOption[]>(() => {
     const actions: ActionOption[] = [];
     if (isMyTurn && awaitingTile) {
       actions.push({ label: "Passar compra", action: () => send({ type: "passPurchase" }), icon: "↩", disabled: isAnimatingMove });
+    }
+    if (upgradeContext?.canAct && upgradeContext.cost !== null && !upgradeContext.maxed) {
+      actions.push({
+        label: `Melhorar (${upgradeContext.cost})`,
+        action: () => send({ type: "upgradeProperty", propertyId: upgradeContext.tile.id }),
+        icon: "🏗️",
+        disabled: isAnimatingMove || !upgradeContext.affordable,
+        detail: upgradeContext.affordable ? `Eleva ao nível ${upgradeContext.level + 1}` : "Dinheiro insuficiente"
+      });
     }
     if (isMyTurn && me?.inJailTurns && !game?.turn.rolled) {
       actions.push({
@@ -603,7 +641,7 @@ export default function App() {
       actions.push({ label: "Iniciar partida", action: () => send({ type: "startGame" }), icon: "🚀", disabled: isAnimatingMove });
     }
     return actions.filter((a) => a.label !== primaryAction.label);
-  }, [awaitingTile, game, isAnimatingMove, isMyTurn, me?.inJailTurns, primaryAction.label, send, session?.playerId]);
+  }, [awaitingTile, game, isAnimatingMove, isMyTurn, me?.inJailTurns, primaryAction.label, send, session?.playerId, upgradeContext]);
 
   useEffect(() => {
     if (eventHydratedRef.current || !game) return;
@@ -638,6 +676,8 @@ export default function App() {
         roomCode={game?.roomId || roomInput}
         lastMovedTileId={lastMovedTileId || undefined}
         animatingPlayerId={animatingPlayerId}
+        isBoardOnly={broadcastBoardOnly}
+        onToggleBoardOnly={() => setBroadcastBoardOnly((prev) => !prev)}
       />
     );
   }
@@ -833,10 +873,19 @@ export default function App() {
                 awaitingTile={awaitingTile || undefined}
                 currentTile={currentTile}
                 eventCard={shouldShowEventCard ? lastEventCard : null}
+                upgradeTile={upgradeContext?.canAct ? upgradeContext.tile : undefined}
+                upgradeCost={upgradeContext?.cost ?? null}
+                upgradeAffordable={upgradeContext?.affordable ?? false}
+                upgradeMaxed={upgradeContext?.maxed ?? false}
                 isMyTurn={isMyTurn}
                 isAnimating={isAnimatingMove}
                 onBuy={() => awaitingTile && send({ type: "buyProperty", propertyId: awaitingTile.id })}
                 onPass={() => send({ type: "passPurchase" })}
+                onUpgrade={
+                  upgradeContext?.canAct && upgradeContext.cost !== null && upgradeContext.affordable
+                    ? () => send({ type: "upgradeProperty", propertyId: upgradeContext.tile.id })
+                    : undefined
+                }
                 onDismissEvent={() => lastEventCard && setSeenEventLogId(lastEventCard.logId)}
               />
               {isMobile && lastLogEntry && (
@@ -925,7 +974,7 @@ export default function App() {
             </div>
             {awaitingTile && (
               <div className="callout">
-                <strong>{awaitingTile.name}</strong> - preço {awaitingTile.price}, aluguel base {awaitingTile.baseRent}
+                <strong>{awaitingTile.name}</strong> - preço {awaitingTile.price}, aluguel nível 1 {awaitingTile.baseRent}
               </div>
             )}
             {currentTile && (
@@ -1006,7 +1055,9 @@ function BroadcastView({
   serverUrl,
   roomCode,
   lastMovedTileId,
-  animatingPlayerId
+  animatingPlayerId,
+  isBoardOnly,
+  onToggleBoardOnly
 }: {
   game: GameState | null;
   coords: { row: number; col: number }[];
@@ -1025,7 +1076,10 @@ function BroadcastView({
   roomCode?: string | null;
   lastMovedTileId?: string;
   animatingPlayerId?: string | null;
+  isBoardOnly: boolean;
+  onToggleBoardOnly: () => void;
 }) {
+  const pageClass = `broadcast-page ${isBoardOnly ? "board-only" : ""}`;
   const players = game?.players ?? [];
   const turnPlayerId = game?.turn.currentPlayerId;
   const orderedPlayers = useMemo(
@@ -1056,45 +1110,54 @@ function BroadcastView({
   const recentLog = game?.log.slice(-6).reverse() ?? [];
 
   return (
-    <div className="broadcast-page">
-      <header className="broadcast-hero">
-        <div>
-          <p className="eyebrow">Transmissão</p>
-          <h1>Banco Imobiliário · Sala {roomCode || "—"}</h1>
-          <p className="muted">Abra este link no Chrome e faça cast para a TV. Status sempre ao vivo.</p>
-          <div className="top-actions">
-            <span className={`chip ${game?.status ?? "lobby"}`}>{statusLabel}</span>
-            <span className="badge">
-              {players.length} jogador{players.length === 1 ? "" : "es"}
-            </span>
-            <span className="pill subtle">{serverUrl}</span>
-          </div>
-          {info && <div className="info">{info}</div>}
-          {error && <div className="error">{error}</div>}
-          {connecting && <div className="muted small">Conectando à sala...</div>}
-        </div>
-        {turnPlayer && (
-          <div className="turn-card hero">
-            <p className="muted small">Turno</p>
-            <h3>{turnPlayer.name}</h3>
-            <p className="muted">{turnTile ? turnTile.name : `Casa ${turnPlayer.position}`}</p>
-            <div className="pill-row">
-              <span className="pill subtle">💰 {turnPlayer.money}</span>
-              <span className="pill subtle">
-                🚓 {turnPlayer.inJailTurns ? `${turnPlayer.inJailTurns}/3 na prisão` : "Livre"}
+    <div className={pageClass}>
+      <div className="broadcast-toolbar">
+        <button className="ghost" onClick={onToggleBoardOnly}>
+          {isBoardOnly ? "Voltar ao layout completo" : "Expandir tabuleiro"}
+        </button>
+        {isBoardOnly && <span className="pill subtle">Modo tabuleiro</span>}
+      </div>
+
+      {!isBoardOnly && (
+        <header className="broadcast-hero">
+          <div>
+            <p className="eyebrow">Transmissão</p>
+            <h1>Banco Imobiliário · Sala {roomCode || "—"}</h1>
+            <p className="muted">Abra este link no Chrome e faça cast para a TV. Status sempre ao vivo.</p>
+            <div className="top-actions">
+              <span className={`chip ${game?.status ?? "lobby"}`}>{statusLabel}</span>
+              <span className="badge">
+                {players.length} jogador{players.length === 1 ? "" : "es"}
               </span>
-              {lastRoll && (
-                <span className="pill subtle">
-                  🎲 {lastRoll.values.join(" + ")} = {lastRoll.total}
-                </span>
-              )}
+              <span className="pill subtle">{serverUrl}</span>
             </div>
+            {info && <div className="info">{info}</div>}
+            {error && <div className="error">{error}</div>}
+            {connecting && <div className="muted small">Conectando à sala...</div>}
           </div>
-        )}
-      </header>
+          {turnPlayer && (
+            <div className="turn-card hero">
+              <p className="muted small">Turno</p>
+              <h3>{turnPlayer.name}</h3>
+              <p className="muted">{turnTile ? turnTile.name : `Casa ${turnPlayer.position}`}</p>
+              <div className="pill-row">
+                <span className="pill subtle">💰 {turnPlayer.money}</span>
+                <span className="pill subtle">
+                  🚓 {turnPlayer.inJailTurns ? `${turnPlayer.inJailTurns}/3 na prisão` : "Livre"}
+                </span>
+                {lastRoll && (
+                  <span className="pill subtle">
+                    🎲 {lastRoll.values.join(" + ")} = {lastRoll.total}
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
+        </header>
+      )}
 
       <div className="broadcast-grid">
-        <div className="board-card broadcast-card">
+        <div className={`board-card broadcast-card ${isBoardOnly ? "expanded" : ""}`}>
           {game ? (
             <>
               <Board
@@ -1120,77 +1183,79 @@ function BroadcastView({
           )}
         </div>
 
-        <div className="broadcast-side">
-          <div className="spectator-players">
-            {orderedPlayers.map((player) => {
-              const props = propertiesByPlayer.get(player.id) ?? [];
-              const color = colors.get(player.id) || "#5FE3B2";
-              const moneyPct = Math.min(100, Math.max(4, (player.money / (game?.settings.startingCash || 1)) * 100));
-              const tileName = game?.tiles.find((t) => t.index === player.position)?.name ?? `Casa ${player.position}`;
-              return (
-                <div
-                  key={player.id}
-                  className={`spectator-player ${player.bankrupt ? "bankrupt" : ""} ${
-                    player.id === game?.turn.currentPlayerId ? "active" : ""
-                  }`}
-                >
-                  <div className="head">
-                    <div className="bubble" style={{ background: color }}>
-                      {player.name.slice(0, 1).toUpperCase()}
+        {!isBoardOnly && (
+          <div className="broadcast-side">
+            <div className="spectator-players">
+              {orderedPlayers.map((player) => {
+                const props = propertiesByPlayer.get(player.id) ?? [];
+                const color = colors.get(player.id) || "#5FE3B2";
+                const moneyPct = Math.min(100, Math.max(4, (player.money / (game?.settings.startingCash || 1)) * 100));
+                const tileName = game?.tiles.find((t) => t.index === player.position)?.name ?? `Casa ${player.position}`;
+                return (
+                  <div
+                    key={player.id}
+                    className={`spectator-player ${player.bankrupt ? "bankrupt" : ""} ${
+                      player.id === game?.turn.currentPlayerId ? "active" : ""
+                    }`}
+                  >
+                    <div className="head">
+                      <div className="bubble" style={{ background: color }}>
+                        {player.name.slice(0, 1).toUpperCase()}
+                      </div>
+                      <div className="meta">
+                        <strong>{player.name}</strong>
+                        <p className="muted small">{tileName}</p>
+                      </div>
+                      <div className="tags">
+                        {player.bankrupt && <span className="pill danger">Falido</span>}
+                        {player.id === game?.turn.currentPlayerId && <span className="pill success">Turno</span>}
+                        {player.disconnected && <span className="pill warning">Off</span>}
+                      </div>
                     </div>
-                    <div className="meta">
-                      <strong>{player.name}</strong>
-                      <p className="muted small">{tileName}</p>
+                    <div className="stat-line">
+                      <span>Dinheiro {player.money}</span>
+                      <span>Prisão {player.inJailTurns ? `${player.inJailTurns}/3` : "livre"}</span>
                     </div>
-                    <div className="tags">
-                      {player.bankrupt && <span className="pill danger">Falido</span>}
-                      {player.id === game?.turn.currentPlayerId && <span className="pill success">Turno</span>}
-                      {player.disconnected && <span className="pill warning">Off</span>}
+                    <div className="meter">
+                      <div className="fill" style={{ width: `${moneyPct}%`, background: color }} />
                     </div>
+                    {props.length > 0 && (
+                      <div className="props">
+                        {props.map((p) => (
+                          <span key={p.id} className="prop" style={{ borderColor: p.color }}>
+                            {p.name} · Nível {Math.max(1, p.level ?? 1)}
+                          </span>
+                        ))}
+                      </div>
+                    )}
                   </div>
-                  <div className="stat-line">
-                    <span>Dinheiro {player.money}</span>
-                    <span>Prisão {player.inJailTurns ? `${player.inJailTurns}/3` : "livre"}</span>
-                  </div>
-                  <div className="meter">
-                    <div className="fill" style={{ width: `${moneyPct}%`, background: color }} />
-                  </div>
-                  {props.length > 0 && (
-                    <div className="props">
-                      {props.map((p) => (
-                        <span key={p.id} className="prop" style={{ borderColor: p.color }}>
-                          {p.name}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
+                );
+              })}
+            </div>
 
-          <div className="broadcast-log">
-            <div className="log-head">
-              <div>
-                <p className="eyebrow">Ao vivo</p>
-                <h4>Últimas ações</h4>
-              </div>
-              {lastLogEntry && <span className="pill subtle">Agora: {lastLogEntry.message}</span>}
-            </div>
-            <div className="log-list">
-              {recentLog.map((entry) => (
-                <div key={entry.id} className="log-item">
-                  <span className="dot" />
-                  <div>
-                    <p className="muted small">{new Date(entry.timestamp).toLocaleTimeString()}</p>
-                    <p>{entry.message}</p>
-                  </div>
+            <div className="broadcast-log">
+              <div className="log-head">
+                <div>
+                  <p className="eyebrow">Ao vivo</p>
+                  <h4>Últimas ações</h4>
                 </div>
-              ))}
-              {recentLog.length === 0 && <p className="muted">Sem eventos ainda.</p>}
+                {lastLogEntry && <span className="pill subtle">Agora: {lastLogEntry.message}</span>}
+              </div>
+              <div className="log-list">
+                {recentLog.map((entry) => (
+                  <div key={entry.id} className="log-item">
+                    <span className="dot" />
+                    <div>
+                      <p className="muted small">{new Date(entry.timestamp).toLocaleTimeString()}</p>
+                      <p>{entry.message}</p>
+                    </div>
+                  </div>
+                ))}
+                {recentLog.length === 0 && <p className="muted">Sem eventos ainda.</p>}
+              </div>
             </div>
           </div>
-        </div>
+        )}
       </div>
     </div>
   );
@@ -1371,10 +1436,14 @@ function Board({
           const displayPos = displayPositions.get(p.id) ?? p.position;
           return displayPos === tile.index && !p.bankrupt;
         });
-        const ownerName =
-          tile.type === "property" && (tile as PropertyTile).ownerId
-            ? players.find((p) => p.id === (tile as PropertyTile).ownerId)?.name
-            : null;
+        const property = tile.type === "property" ? (tile as PropertyTile) : null;
+        const ownerName = property?.ownerId ? players.find((p) => p.id === property.ownerId)?.name : null;
+        const propertyLevel = property
+          ? property.ownerId
+            ? Math.max(1, property.level ?? 1)
+            : Math.max(0, property.level ?? 0)
+          : 0;
+        const rentDisplay = property ? property.baseRent * Math.max(1, propertyLevel || 1) : 0;
         const isActive = currentPlayerId && tilePlayers.some((p) => p.id === currentPlayerId);
         const isMeHere = meId ? tilePlayers.some((p) => p.id === meId) : false;
         const tileClass = `tile ${tile.type} ${isActive ? "active" : ""} ${
@@ -1413,13 +1482,16 @@ function Board({
                   <div className="price-line">
                     <span className="pill">Preço {tile.price}</span>
                     <div className="rent-highlight">
-                      <span className="rent-label">Aluguel</span>
-                      <span className="rent-value">{(tile as PropertyTile).baseRent}</span>
+                      <span className="rent-label">Aluguel (nível {propertyLevel || 1})</span>
+                      <span className="rent-value">{rentDisplay}</span>
                     </div>
                   </div>
-                  {(tile as PropertyTile).ownerId && (
+                  <span className="muted small">
+                    Nível atual: {propertyLevel} {property?.ownerId ? "" : "(sem dono)"}
+                  </span>
+                  {property?.ownerId && (
                     <span className="muted small">
-                      Dono: {(tile as PropertyTile).ownerId === meId ? "Você" : ownerName ?? "Jogador"}
+                      Dono: {property.ownerId === meId ? "Você" : ownerName ?? "Jogador"}
                     </span>
                   )}
                 </>
@@ -1478,19 +1550,29 @@ function TileOverlay({
   awaitingTile,
   currentTile,
   eventCard,
+  upgradeTile,
+  upgradeCost,
+  upgradeAffordable,
+  upgradeMaxed,
   isMyTurn,
   isAnimating,
   onBuy,
   onPass,
+  onUpgrade,
   onDismissEvent
 }: {
   awaitingTile?: PropertyTile;
   currentTile?: Tile;
   eventCard?: { title: string; description?: string; logId?: string } | null;
+  upgradeTile?: PropertyTile;
+  upgradeCost?: number | null;
+  upgradeAffordable?: boolean;
+  upgradeMaxed?: boolean;
   isMyTurn: boolean;
   isAnimating: boolean;
   onBuy: () => void;
   onPass: () => void;
+  onUpgrade?: () => void;
   onDismissEvent: () => void;
 }) {
   const cards: JSX.Element[] = [];
@@ -1507,8 +1589,9 @@ function TileOverlay({
         </div>
         <h4>{awaitingTile.name}</h4>
         <p className="muted small">
-          Preço {awaitingTile.price} · aluguel base {awaitingTile.baseRent}
+          Preço {awaitingTile.price} · aluguel nível 1 {awaitingTile.baseRent}
         </p>
+        <p className="muted small">Ao comprar, ela já vem no nível 1 e pode ser melhorada até o nível 3.</p>
         <div className="actions-inline">
           <button className="primary" disabled={!isMyTurn || isAnimating} onClick={onBuy}>
             Comprar
@@ -1517,6 +1600,39 @@ function TileOverlay({
             Passar compra
           </button>
         </div>
+      </div>
+    );
+  }
+
+  if (upgradeTile) {
+    const level = Math.max(1, upgradeTile.level ?? 1);
+    const nextLevel = Math.min(MAX_PROPERTY_LEVEL, level + 1);
+    const currentRent = propertyRent(upgradeTile);
+    const nextRent = upgradeTile.baseRent * nextLevel;
+    const disabled = upgradeMaxed || !upgradeCost || !upgradeAffordable || isAnimating || !onUpgrade;
+    cards.push(
+      <div
+        className="tile-card"
+        key="upgrade"
+        style={{ borderColor: upgradeTile.color, boxShadow: "0 12px 28px rgba(0,0,0,0.32)" }}
+      >
+        <div className="badge" style={{ borderColor: upgradeTile.color, color: upgradeTile.color }}>
+          Melhoria
+        </div>
+        <h4>
+          {upgradeTile.name} · nível {level}
+        </h4>
+        <p className="muted small">
+          Aluguel atual {currentRent}. Próximo nível ({nextLevel}) cobra {nextRent}.
+        </p>
+        <div className="actions-inline">
+          <button className="primary" disabled={disabled} onClick={onUpgrade}>
+            {upgradeMaxed ? "Nível máximo" : `Melhorar por ${upgradeCost ?? "—"}`}
+          </button>
+          <span className="muted small">Melhoria opcional; finalize o turno se preferir.</span>
+        </div>
+        {!upgradeAffordable && !upgradeMaxed && <p className="muted small">Dinheiro insuficiente para esta melhoria.</p>}
+        {upgradeMaxed && <p className="muted small">Esta propriedade já está no nível máximo.</p>}
       </div>
     );
   }
@@ -1619,7 +1735,7 @@ function PlayerRow({
           <div className="prop-row">
             {properties.map((p) => (
               <span key={p.id} className="prop-pill" style={{ borderColor: p.color }}>
-                {p.name}
+                {p.name} · Nível {Math.max(1, p.level ?? 1)}
               </span>
             ))}
           </div>
@@ -1673,6 +1789,7 @@ function tileGlyph(type: Tile["type"]) {
 function buildTurnSteps(isMyTurn: boolean, turn?: GameState["turn"], awaitingTile?: PropertyTile | null) {
   const rolled = !!turn?.rolled;
   const awaiting = !!awaitingTile;
+  const upgradePending = !!turn?.awaitingUpgrade;
   return [
     {
       label: "Rolagem",
@@ -1690,6 +1807,11 @@ function buildTurnSteps(isMyTurn: boolean, turn?: GameState["turn"], awaitingTil
       hint: awaiting ? "Comprar ou passar" : "Sem compra pendente"
     },
     {
+      label: "Melhorias",
+      status: upgradePending ? "active" : rolled ? "done" : "",
+      hint: upgradePending ? "Opcional: evolua sua propriedade" : rolled ? "Sem melhoria pendente" : "Após rolar"
+    },
+    {
       label: "Finalizar",
       status: isMyTurn && rolled && !awaiting ? "active" : rolled && !awaiting ? "done" : "",
       hint: isMyTurn ? "Finalize ou continue ações" : "Aguardando turno"
@@ -1701,6 +1823,7 @@ function logBadge(message: string) {
   const lower = message.toLowerCase();
   if (lower.includes("rolou")) return { label: "Rolagem", tone: "event" };
   if (lower.includes("comprou")) return { label: "Compra", tone: "event" };
+  if (lower.includes("melhorou")) return { label: "Upgrade", tone: "event" };
   if (lower.includes("imposto")) return { label: "Imposto", tone: "tax" };
   if (lower.includes("pagou")) return { label: "Pagamento", tone: "tax" };
   if (lower.includes("recebeu") || lower.includes("bonus") || lower.includes("bônus")) return { label: "Recebido", tone: "event" };

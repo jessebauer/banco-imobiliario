@@ -126,6 +126,12 @@ function handleMessage(ws: WebSocket, message: ClientMessage) {
         broadcastState(room);
       });
       break;
+    case "upgradeProperty":
+      handleWithRoom(ws, (room, playerId) => {
+        room.engine.upgradeProperty(playerId, message.propertyId);
+        broadcastState(room);
+      });
+      break;
     case "passPurchase":
       handleWithRoom(ws, (room, playerId) => {
         room.engine.passPurchase(playerId);
