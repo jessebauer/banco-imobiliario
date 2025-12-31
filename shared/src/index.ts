@@ -17,6 +17,7 @@ export type PropertyTile = TileBase & {
   price: number;
   baseRent: number;
   color: string;
+  upgradable?: boolean;
   ownerId?: string;
   mortgaged?: boolean;
   level?: number;
@@ -199,12 +200,16 @@ export const PROPERTY_RENT_MULTIPLIER = 2;
 export const MAX_PROPERTY_LEVEL = 3;
 
 export function propertyRent(tile: PropertyTile) {
+  if (tile.upgradable === false) {
+    return tile.ownerId ? tile.baseRent : 0;
+  }
   const level = tile.ownerId ? Math.max(1, tile.level ?? 1) : 0;
   if (level === 0) return 0;
   return tile.baseRent * level;
 }
 
 export function propertyUpgradeCost(tile: PropertyTile) {
+  if (tile.upgradable === false) return null;
   if (!tile.ownerId) return null;
   const level = Math.max(1, tile.level ?? 1);
   if (level >= MAX_PROPERTY_LEVEL) return null;
@@ -212,6 +217,7 @@ export function propertyUpgradeCost(tile: PropertyTile) {
 }
 
 export function propertyAssetValue(tile: PropertyTile) {
+  if (tile.upgradable === false) return tile.ownerId ? tile.price : 0;
   if (!tile.ownerId) return 0;
   const level = Math.max(1, tile.level ?? 1);
   // Purchase price + sum of upgrade costs up to current level (price * 1 + price * 2 + ...).
@@ -223,23 +229,63 @@ export const DEFAULT_BOARD: Tile[] = [
   { id: "start", name: "Início", index: 0, type: "start", bonus: 200 },
   { id: "p1", name: "Lago Azul", index: 1, type: "property", price: 100, baseRent: 25, color: "#5FB3B3" },
   { id: "p2", name: "Praça Solar", index: 2, type: "property", price: 120, baseRent: 30, color: "#5FB3B3" },
-  { id: "tax1", name: "Imposto de Renda", index: 3, type: "tax", amount: 150 },
-  { id: "event1", name: "Sorte/Reves", index: 4, type: "event" },
-  { id: "p3", name: "Vila Sombra", index: 5, type: "property", price: 140, baseRent: 35, color: "#E27D60" },
-  { id: "p4", name: "Jardim Âmbar", index: 6, type: "property", price: 160, baseRent: 40, color: "#E27D60" },
-  { id: "jail", name: "Prisao/Visita", index: 7, type: "jail" },
-  { id: "p5", name: "Mar Turquesa", index: 8, type: "property", price: 180, baseRent: 45, color: "#4D9DE0" },
-  { id: "p6", name: "Orla Safira", index: 9, type: "property", price: 200, baseRent: 50, color: "#4D9DE0" },
-  { id: "tax2", name: "Imposto de Luxo", index: 10, type: "tax", amount: 100 },
-  { id: "event2", name: "Sorte/Reves", index: 11, type: "event" },
-  { id: "p7", name: "Vale Rubi", index: 12, type: "property", price: 220, baseRent: 55, color: "#C06C84" },
-  { id: "p8", name: "Forte Carmim", index: 13, type: "property", price: 240, baseRent: 60, color: "#C06C84" },
-  { id: "free", name: "Pausa Zen", index: 14, type: "free" },
-  { id: "p9", name: "Distrito Âmbar", index: 15, type: "property", price: 260, baseRent: 65, color: "#F67280" },
-  { id: "p10", name: "Colina Coral", index: 16, type: "property", price: 280, baseRent: 70, color: "#F67280" },
-  { id: "event3", name: "Sorte/Reves", index: 17, type: "event" },
-  { id: "p11", name: "Aurora Prime", index: 18, type: "property", price: 300, baseRent: 75, color: "#355C7D" },
-  { id: "go-to-jail", name: "Vá para Prisão", index: 19, type: "go-to-jail" }
+  {
+    id: "air-company",
+    name: "Companhia de aviação",
+    index: 3,
+    type: "property",
+    price: 400,
+    baseRent: 175,
+    color: "#95A5A6",
+    upgradable: false
+  },
+  { id: "tax1", name: "Imposto de Renda", index: 4, type: "tax", amount: 150 },
+  { id: "event1", name: "Sorte/Reves", index: 5, type: "event" },
+  { id: "p3", name: "Vila Sombra", index: 6, type: "property", price: 140, baseRent: 35, color: "#E27D60" },
+  { id: "p4", name: "Jardim Âmbar", index: 7, type: "property", price: 160, baseRent: 40, color: "#E27D60" },
+  { id: "jail", name: "Prisao/Visita", index: 8, type: "jail" },
+  {
+    id: "sea-company",
+    name: "Companhia de navegação",
+    index: 9,
+    type: "property",
+    price: 400,
+    baseRent: 175,
+    color: "#95A5A6",
+    upgradable: false
+  },
+  { id: "p5", name: "Mar Turquesa", index: 10, type: "property", price: 180, baseRent: 45, color: "#4D9DE0" },
+  { id: "p6", name: "Orla Safira", index: 11, type: "property", price: 200, baseRent: 50, color: "#4D9DE0" },
+  { id: "tax2", name: "Imposto de Luxo", index: 12, type: "tax", amount: 100 },
+  { id: "event2", name: "Sorte/Reves", index: 13, type: "event" },
+  { id: "p7", name: "Vale Rubi", index: 14, type: "property", price: 220, baseRent: 55, color: "#C06C84" },
+  {
+    id: "road-company",
+    name: "Companhia rodoviária",
+    index: 15,
+    type: "property",
+    price: 400,
+    baseRent: 175,
+    color: "#95A5A6",
+    upgradable: false
+  },
+  { id: "p8", name: "Forte Carmim", index: 16, type: "property", price: 240, baseRent: 60, color: "#C06C84" },
+  { id: "free", name: "Pausa Zen", index: 17, type: "free" },
+  { id: "p9", name: "Distrito Âmbar", index: 18, type: "property", price: 260, baseRent: 65, color: "#F67280" },
+  { id: "p10", name: "Colina Coral", index: 19, type: "property", price: 280, baseRent: 70, color: "#F67280" },
+  { id: "event3", name: "Sorte/Reves", index: 20, type: "event" },
+  {
+    id: "rail-company",
+    name: "Companhia ferroviária",
+    index: 21,
+    type: "property",
+    price: 400,
+    baseRent: 175,
+    color: "#95A5A6",
+    upgradable: false
+  },
+  { id: "p11", name: "Aurora Prime", index: 22, type: "property", price: 300, baseRent: 75, color: "#355C7D" },
+  { id: "go-to-jail", name: "Vá para Prisão", index: 23, type: "go-to-jail" }
 ];
 
 export const DEFAULT_SETTINGS_OPTIONS = {

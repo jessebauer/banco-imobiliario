@@ -66,6 +66,22 @@ describe("GameEngine rules", () => {
     expect(tile.baseRent).toBe(50);
   });
 
+  it("adds fixed-amount transport companies that cannot be upgraded", () => {
+    const company = engine.state.tiles.find((t) => t.id === "air-company") as PropertyTile;
+    expect(company.price).toBe(800);
+    expect(company.baseRent).toBe(350);
+    company.ownerId = hostId;
+    company.level = 1;
+    const host = engine.state.players.find((p) => p.id === hostId)!;
+    host.position = company.index;
+    (engine as any).handleProperty(host, company);
+    expect(engine.state.turn.awaitingUpgrade).toBeUndefined();
+    expect(propertyRent(company)).toBe(350);
+    engine.state.turn.awaitingUpgrade = company.id;
+    engine.state.turn.rolled = true;
+    expect(() => engine.upgradeProperty(hostId, company.id)).toThrow(/não pode ser melhorada/i);
+  });
+
   it("applies taxes and bankruptcy", () => {
     const player = engine.state.players.find((p) => p.id === hostId)!;
     player.money = 50;
@@ -109,7 +125,9 @@ describe("GameEngine rules", () => {
       { id: "carta-prisao", title: "Carta prisão", description: "Vá para a prisão", effect: { goToJail: true } }
     ];
 
-    vi.spyOn(Math, "random").mockReturnValue(0.2); // 2 + 2 = 4 (event tile)
+    vi.spyOn(Math, "random")
+      .mockReturnValueOnce(0.2) // 2
+      .mockReturnValueOnce(0.35); // 3 -> total 5 (casa de evento)
     engine.rollDice(hostId);
 
     expect(player.position).toBe(jailIndex);

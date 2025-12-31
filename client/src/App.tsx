@@ -4,6 +4,7 @@ import {
   DiceRoll,
   GameState,
   EVENT_CARDS,
+  DEFAULT_BOARD,
   PlayerState,
   PropertyTile,
   MAX_PROPERTY_LEVEL,
@@ -408,13 +409,18 @@ export default function App() {
     return `${base}?view=broadcast&room=${room}&server=${encodeURIComponent(serverUrl)}`;
   }, [createdRoomId, roomInput, serverUrl, session?.roomId]);
 
-  const coords = useMemo(() => buildCoords(6), []);
+  const boardSize = useMemo(
+    () => boardSizeFromTiles(game?.tiles.length ?? DEFAULT_BOARD.length),
+    [game?.tiles.length]
+  );
+  const coords = useMemo(() => buildCoords(boardSize), [boardSize]);
 
   const currentTile = game?.tiles.find((t) => t.index === me?.position);
 
   const upgradeContext = useMemo(() => {
     if (!game || !awaitingUpgradeTile || !me) return null;
     if (awaitingUpgradeTile.ownerId !== me.id) return null;
+    if (awaitingUpgradeTile.upgradable === false) return null;
     const level = Math.max(1, awaitingUpgradeTile.level ?? 1);
     const cost = propertyUpgradeCost(awaitingUpgradeTile);
     const canAct =
@@ -857,6 +863,7 @@ export default function App() {
               <Board
                 tiles={game.tiles}
                 coords={coords}
+                boardSize={boardSize}
                 players={game.players}
                 currentPlayerId={game.turn.currentPlayerId}
                 meId={session?.playerId}
@@ -1163,6 +1170,7 @@ function BroadcastView({
               <Board
                 tiles={game.tiles}
                 coords={coords}
+                boardSize={boardSize}
                 players={game.players}
                 currentPlayerId={game.turn.currentPlayerId}
                 colors={colors}
@@ -1390,6 +1398,7 @@ function MobileActionBar({
 function Board({
   tiles,
   coords,
+  boardSize,
   players,
   currentPlayerId,
   meId,
@@ -1410,6 +1419,7 @@ function Board({
   colors: Map<string, string>;
   lastMovedTileId?: string;
   compact?: boolean;
+  boardSize: number;
   displayPositions: Map<string, number>;
   tileCenters: Map<string, { x: number; y: number }>;
   registerTileRef?: (tileId: string, el: HTMLDivElement | null) => void;
@@ -1429,7 +1439,7 @@ function Board({
     return grouped;
   }, [displayPositions, players]);
   return (
-    <div className={boardClass} ref={boardRef}>
+    <div className={boardClass} ref={boardRef} style={{ ["--board-size" as any]: boardSize }}>
       {tiles.map((tile, idx) => {
         const pos = coords[idx];
         const tilePlayers = players.filter((p) => {
@@ -1443,7 +1453,11 @@ function Board({
             ? Math.max(1, property.level ?? 1)
             : Math.max(0, property.level ?? 0)
           : 0;
-        const rentDisplay = property ? property.baseRent * Math.max(1, propertyLevel || 1) : 0;
+        const rentDisplay = property
+          ? property.upgradable === false
+            ? property.baseRent
+            : property.baseRent * Math.max(1, propertyLevel || 1)
+          : 0;
         const isActive = currentPlayerId && tilePlayers.some((p) => p.id === currentPlayerId);
         const isMeHere = meId ? tilePlayers.some((p) => p.id === meId) : false;
         const tileClass = `tile ${tile.type} ${isActive ? "active" : ""} ${
@@ -1489,6 +1503,7 @@ function Board({
                   <span className="muted small">
                     Nível atual: {propertyLevel} {property?.ownerId ? "" : "(sem dono)"}
                   </span>
+                  {property?.upgradable === false && <span className="muted small">Não pode ser melhorada</span>}
                   {property?.ownerId && (
                     <span className="muted small">
                       Dono: {property.ownerId === meId ? "Você" : ownerName ?? "Jogador"}
@@ -1865,6 +1880,10 @@ function pawnOffset(index: number) {
   ];
   const safeIndex = index >= 0 ? index % offsets.length : 0;
   return offsets[safeIndex];
+}
+
+function boardSizeFromTiles(tileCount: number) {
+  return Math.max(3, Math.ceil(tileCount / 4) + 1);
 }
 
 function sleep(ms: number) {

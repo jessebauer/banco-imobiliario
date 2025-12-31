@@ -409,8 +409,8 @@ button:disabled {
 
 .board {
   display: grid;
-  grid-template-columns: repeat(6, 1fr);
-  grid-template-rows: repeat(6, minmax(96px, 1fr));
+  grid-template-columns: repeat(var(--board-size, 6), 1fr);
+  grid-template-rows: repeat(var(--board-size, 6), minmax(96px, 1fr));
   gap: 12px;
   position: relative;
   z-index: 1;

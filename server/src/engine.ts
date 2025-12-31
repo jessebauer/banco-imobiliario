@@ -192,6 +192,7 @@ export class GameEngine {
     if (!player) throw new Error("Jogador não encontrado");
     const tile = this.getProperty(propertyId);
     if (!tile) throw new Error("Propriedade inválida");
+    if (tile.upgradable === false) throw new Error("Esta propriedade não pode ser melhorada.");
     if (tile.ownerId !== playerId) throw new Error("Você não é o dono desta propriedade.");
     if (this.state.turn.awaitingUpgrade !== propertyId) {
       throw new Error("Melhoria disponível apenas ao visitar esta propriedade neste turno.");
@@ -287,6 +288,10 @@ export class GameEngine {
     }
     if (tile.ownerId === player.id) {
       tile.level = Math.max(1, tile.level ?? 1);
+      if (tile.upgradable === false) {
+        this.log(`${player.name} visitou ${tile.name}. Nível fixo (sem melhorias).`);
+        return;
+      }
       if (tile.level < MAX_PROPERTY_LEVEL) {
         this.state.turn.awaitingUpgrade = tile.id;
         const cost = propertyUpgradeCost(tile);
