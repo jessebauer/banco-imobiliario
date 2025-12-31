@@ -146,7 +146,7 @@ describe("GameEngine rules", () => {
 
     engine.rollDice(hostId);
     expect(player.inJailTurns).toBe(0);
-    expect(player.money).toBe(startMoney - 50);
+    expect(player.money).toBe(startMoney - 200);
     expect(player.position).toBe((jailIndex + 7) % engine.state.tiles.length);
   });
 });

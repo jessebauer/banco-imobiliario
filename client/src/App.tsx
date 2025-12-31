@@ -623,7 +623,7 @@ export default function App() {
     }
     if (isMyTurn && me?.inJailTurns && !game?.turn.rolled) {
       actions.push({
-        label: "Pagar fiança (50)",
+        label: "Pagar fiança (200)",
         action: () => send({ type: "payBail" }),
         icon: "🪙",
         disabled: isAnimatingMove

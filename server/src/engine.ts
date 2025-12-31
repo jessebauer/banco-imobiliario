@@ -19,7 +19,7 @@ import {
 } from "@banco/shared";
 import { nanoid } from "nanoid";
 
-const BAIL_COST = 50;
+const BAIL_COST = 200;
 const MAX_JAIL_TURNS = 3;
 
 export class GameEngine {
